@@ -1,5 +1,6 @@
 using AgentMemory.Retrieval;
 using ModelContextProtocol.Server;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 
 namespace AgentMemory.Capture;
@@ -12,6 +13,7 @@ namespace AgentMemory.Capture;
 /// Only agent-facing tools live here; capture, admin, and search/context endpoints
 /// stay as plain HTTP minimal APIs.
 /// </summary>
+[McpServerToolType]
 public class McpTools
 {
     private readonly IRetrievalService _retrieval;
@@ -21,19 +23,21 @@ public class McpTools
         _retrieval = retrieval;
     }
 
-/// <summary>
-/// Search past memories semantically. Returns memories whose content is similar
-/// to the query, with similarity scores. Call this before making a significant
-/// decision, before asking about project conventions, or when you suspect relevant
-/// context might exist from a past session.
-/// </summary>
-[McpServerTool(Name = "search_memories", ReadOnly = true)]
-public async Task<McpSearchMemoriesResult> SearchMemoriesAsync(
-    string query,
-    int? limit = null,
-    double? min_similarity = null,
-    string? category = null,
-    CancellationToken ct = default)
+    [McpServerTool(Name = "search_memories", ReadOnly = true)]
+    [Description(
+        "Search past memories from this project's AgentMemory sidecar. Returns memories " +
+        "whose content is semantically similar to the query, with similarity scores. Call " +
+        "this before making a significant decision, before asking about project " +
+        "conventions, or when you suspect relevant context might exist from a past " +
+        "session. This is explicitly an on-demand tool — call it when you need it, not on " +
+        "every turn (relevant memories are already injected automatically before each " +
+        "prompt).")]
+    public async Task<McpSearchMemoriesResult> SearchMemoriesAsync(
+        [Description("The search query.")] string query,
+        [Description("Maximum number of results to return. Defaults to 5.")] int? limit = null,
+        [Description("Minimum cosine similarity (0-1) a result must meet. Defaults to 0.7.")] double? min_similarity = null,
+        [Description("Optional category filter, e.g. 'decision', 'coding', 'configuration'.")] string? category = null,
+        CancellationToken ct = default)
     {
         var results = await _retrieval.SearchAsync(
             query,

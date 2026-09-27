@@ -12,14 +12,14 @@ HTTP calls to an ASP.NET Core server whenever the agent submits a prompt, calls 
 ends a session. The server classifies each captured event with an LLM call (via OpenRouter) —
 deciding whether it's worth remembering, and tagging it with a category (question, coding,
 tool call, etc.) and a save-worthiness score — then embeds and stores anything that clears a
-configurable threshold in PostgreSQL (pgvector). Retrieval now exists too (Phase 3): a
-`UserPromptSubmit` hook injects relevant past memories as context, and an on-demand search
-endpoint is documented in `CLAUDE.md` for the agent to call directly.
+configurable threshold in PostgreSQL (pgvector). Retrieval now exists too: a `UserPromptSubmit`
+hook injects relevant past memories as context (Phase 3), and an on-demand `search_memories`
+tool is exposed over a real MCP JSON-RPC/SSE transport for auto-discovery (Phase 4).
 
-Note on naming: the server is a plain ASP.NET Core HTTP API, not an MCP server with JSON-RPC
-transport — Claude Code cannot auto-discover its endpoints as MCP tools. Its `/tools/*`
-endpoints are surfaced to the agent only through `CLAUDE.md`'s instructions. See "Known
-limitations" below.
+Note on naming: only `search_memories` is a real MCP tool. The `/capture`, `/admin/*`, and
+`/search`/`/search/context` endpoints are — and stay — plain HTTP; they're used by hooks and
+the CLI, neither of which is an MCP client. See "Known limitations" below for what's still
+not reconciled with Claude Code's actual hook/MCP conventions.
 
 ## Scope
 
@@ -55,8 +55,9 @@ storage logic live **in the HTTP server itself**, not behind a CLI subprocess ca
 The CLI is a separate, thin client for manual/admin operations only.
 
 ```
-src/AgentMemory/              ASP.NET Core HTTP API (see "Known limitations" re: not real MCP)
-  Capture/                    Capture, admin, search, and tool endpoints
+src/AgentMemory/              ASP.NET Core HTTP API + a real MCP tool (search_memories)
+  Capture/                    Capture, admin, and search endpoints (plain HTTP), plus
+                               McpTools.cs (search_memories, over MCP transport)
   Classification/             OpenRouter client, prompt construction, JSON response parsing,
                                threshold comparison
   Embedding/                  OpenRouter embeddings client
@@ -205,6 +206,15 @@ CREATE INDEX memories_embedding_hnsw
   auto-discovered MCP tool.
 - Exit criteria: `claude mcp add --transport http http://localhost:5098/mcp` connects and
   lists `search_memories` as an auto-discovered tool.
+- **Review fix:** the initial implementation used XML doc comments for the tool's and its
+  parameters' descriptions, which the MCP SDK doesn't read — `tools/list` returned
+  `"description": ""` for `search_memories` and no `description` on any parameter, verified
+  live against a running server. The SDK's convention (confirmed against its own samples) is
+  `[System.ComponentModel.Description("...")]` on the method and on each parameter, plus
+  `[McpServerToolType]` on the containing class; `McpTools.cs` now uses that, and `tools/list`
+  now returns the intended description text. Added `McpToolsTests.cs` (unit tests around
+  `SearchMemoriesAsync`'s default/override argument forwarding) since there was no test
+  coverage for this class.
 
 ### Post-implementation fixes
 
