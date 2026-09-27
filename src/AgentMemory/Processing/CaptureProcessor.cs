@@ -14,22 +14,25 @@ public class CaptureProcessor
     private const double DefaultSaveThreshold = 0.5;
     private const string SaveThresholdConfigKey = "Memory:SaveThreshold";
 
-    private readonly IServiceScopeFactory _scopeFactory;
-    private readonly ClassificationService _classification;
-    private readonly EmbeddingService _embedding;
+    private readonly ICaptureRepository _captureRepo;
+    private readonly IClassificationService _classification;
+    private readonly IEmbeddingService _embedding;
+    private readonly IMemoryRepository _memoryRepo;
     private readonly IConfiguration _configuration;
     private readonly ILogger<CaptureProcessor> _logger;
 
     public CaptureProcessor(
-        IServiceScopeFactory scopeFactory,
-        ClassificationService classification,
-        EmbeddingService embedding,
+        ICaptureRepository captureRepo,
+        IClassificationService classification,
+        IEmbeddingService embedding,
+        IMemoryRepository memoryRepo,
         IConfiguration configuration,
         ILogger<CaptureProcessor> logger)
     {
-        _scopeFactory = scopeFactory;
         _classification = classification;
         _embedding = embedding;
+        _memoryRepo = memoryRepo;
+        _captureRepo = captureRepo;
         _configuration = configuration;
         _logger = logger;
     }
@@ -42,11 +45,7 @@ public class CaptureProcessor
     {
         try
         {
-            // Re-resolve the DbContext via scope — this runs on a background thread
-            using var scope = _scopeFactory.CreateScope();
-            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-
-            var capture = await db.Captures.FindAsync(new object[] { captureId }, ct);
+            var capture = await _captureRepo.GetByIdAsync(captureId, ct);
             if (capture == null)
             {
                 _logger.LogWarning("Capture {CaptureId} not found for processing", captureId);
@@ -83,7 +82,7 @@ public class CaptureProcessor
                 return;
             }
 
-            // Step 4: Store memory
+            // Step 4: Store memory via repository
             var memory = new MemoryRecord
             {
                 CaptureId = capture.Id,
@@ -93,8 +92,7 @@ public class CaptureProcessor
                 Embedding = new Vector(embedding),
             };
 
-            db.Memories.Add(memory);
-            await db.SaveChangesAsync(ct);
+            await _memoryRepo.AddMemoryAsync(memory, ct);
 
             _logger.LogInformation(
                 "Stored memory id={MemoryId} for capture {CaptureId}: category={Category}, score={Score:F2}",

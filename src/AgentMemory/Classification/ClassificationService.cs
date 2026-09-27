@@ -4,21 +4,12 @@ using System.Text.Json.Serialization;
 namespace AgentMemory.Classification;
 
 /// <summary>
-/// Result of a JEV classification call for a captured event.
-/// </summary>
-public record ClassificationResult(
-    string Category,
-    double SaveWorthiness,
-    string? Error
-);
-
-/// <summary>
 /// Classifies captured events using JEV (via the OpenRouter-hosted TypeSafe API).
 /// Makes a single API call with two parallel questions:
 ///   - Choice: which category best describes this event
 ///   - Score: how valuable is this information for future sessions
 /// </summary>
-public class ClassificationService
+public class ClassificationService : IClassificationService
 {
     private readonly HttpClient _http;
     private readonly string _apiKey;

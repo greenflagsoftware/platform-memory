@@ -7,7 +7,7 @@ namespace AgentMemory.Embedding;
 /// Generates embeddings via OpenRouter's embedding endpoint.
 /// Uses text-embedding-3-small (1536 dimensions) by default.
 /// </summary>
-public class EmbeddingService
+public class EmbeddingService : IEmbeddingService
 {
     private readonly HttpClient _http;
     private readonly string _apiKey;
