@@ -1,9 +1,9 @@
 # AgentMemory Development Plan
 
 Status: living document. Update as phases complete or the plan changes — this is not a
-one-time artifact. Phases 0-3 (below) have shipped; this revision closes out the open
-questions raised during a post-implementation review and documents the fixes applied
-alongside that review (see "Post-implementation fixes" at the end of the Phase Plan).
+one-time artifact. Phases 0-3 have shipped; this revision closes out the open questions
+raised during a post-implementation review (see "Post-implementation fixes" in the Phase
+Plan) and scopes Phase 4 (real MCP transport), which has not been started.
 
 ## What this project does
 
@@ -191,6 +191,29 @@ CREATE INDEX memories_embedding_hnsw
   relevant results; all retrieval paths gracefully handle missing API keys and embedding
   failures (return empty, never throw).
 
+### Phase 4 — Real MCP transport (not started)
+
+- Motivation: today the on-demand `search_memories` tool is discovered only through
+  `CLAUDE.md` instructions (see "Known limitations"). Real MCP auto-discovery would let
+  AgentMemory register its tools the way any other MCP server does, and would let the
+  capability compose with other MCP-aware tooling later — but it isn't a functional gap
+  today, since the `UserPromptSubmit` hook already covers proactive context injection and
+  `search_memories` is explicitly an occasional/on-demand tool.
+- Deliverable: add the [`ModelContextProtocol.AspNetCore`](https://www.nuget.org/packages/ModelContextProtocol.AspNetCore)
+  package (the same one the `capability-module-template` this project is loosely based on
+  uses) and expose `search_memories` (and any other agent-facing tools) as
+  `[McpServerTool]`-attributed methods over its HTTP/SSE transport, registered alongside the
+  existing minimal-API endpoints in `Program.cs`. Claude Code would then connect with
+  `claude mcp add --transport http <url>` instead of relying on the `CLAUDE.md` note.
+- Scope note: this **adds** a transport, it doesn't replace the plain HTTP one. The
+  `/capture`, `/admin/*`, and `/search/context` endpoints stay plain HTTP — hooks and the CLI
+  aren't MCP clients and have no reason to become one. Only the agent-facing on-demand
+  tool(s) move to MCP; the background capture pipeline and admin/CLI surface are unaffected.
+- Exit criteria: `claude mcp add` against the running server lists `search_memories` as an
+  auto-discovered tool (no `CLAUDE.md` instruction required for discovery, though usage
+  guidance can still live there); the existing `/tools/search-memories` HTTP endpoint and
+  `CLAUDE.md` note can then be retired.
+
 ### Post-implementation fixes
 
 Gaps found in a post-implementation review, closed in this pass:
@@ -228,8 +251,8 @@ Gaps found in a post-implementation review, closed in this pass:
 - **Not a real MCP server.** `/tools/search-memories` and the automatic context-injection hook
   are the only "tool" surface; there's no MCP JSON-RPC transport, so Claude Code can't
   auto-discover or negotiate this the way it would a registered MCP server. Everything the
-  agent knows about these endpoints comes from `CLAUDE.md`'s instructions. Revisit if/when a
-  real `ModelContextProtocol.AspNetCore`-based transport is worth the effort.
+  agent knows about these endpoints comes from `CLAUDE.md`'s instructions. Scoped as Phase 4
+  above, not yet started.
 - **Hooks read `$args`, not Claude Code's documented stdin JSON contract.** Claude Code hooks
   are typically invoked with a JSON payload on stdin (session id, transcript path, etc.); the
   hooks here (`.claude/settings.json`) pass `"$input"` as a single command-line argument
