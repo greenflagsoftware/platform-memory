@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "5098:8080"
+    env_file:
+      - .env
     environment:
       - ASPNETCORE_ENVIRONMENT=Development
       - ConnectionStrings__DefaultConnection=Host=db;Port=5432;Database=agent_memory;Username=agent_memory;Password=agent_memory;Include Error Detail=true

@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Pgvector.EntityFrameworkCore;
 
 namespace AgentMemory.Storage;
 
@@ -9,10 +10,16 @@ public class AppDbContext : DbContext
     }
 
     public DbSet<CaptureRecord> Captures => Set<CaptureRecord>();
+    public DbSet<MemoryRecord> Memories => Set<MemoryRecord>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
         base.OnModelCreating(modelBuilder);
+
+        // The pgvector extension must be installed before this runs
+        // (bootstrapped in Program.cs via raw ADO.NET). This call registers
+        // the extension with EF Core so subsequent migrations know about it.
+        modelBuilder.HasPostgresExtension("vector");
 
         modelBuilder.Entity<CaptureRecord>(entity =>
         {
@@ -44,8 +51,51 @@ public class AppDbContext : DbContext
                   .HasDefaultValueSql("now()");
         });
 
-        // Ensure pgvector extension is created (safe to run even without the extension loaded)
-        // This is a no-op in Phase 0 since we don't use vector columns yet,
-        // but having it here prepares the DB for Phase 1.
+        modelBuilder.Entity<MemoryRecord>(entity =>
+        {
+            entity.ToTable("memories");
+
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Id)
+                  .HasColumnName("id");
+
+            entity.Property(e => e.CaptureId)
+                  .HasColumnName("capture_id")
+                  .IsRequired();
+
+            entity.Property(e => e.Category)
+                  .HasColumnName("category")
+                  .IsRequired();
+
+            entity.Property(e => e.Score)
+                  .HasColumnName("score")
+                  .IsRequired();
+
+            entity.Property(e => e.Content)
+                  .HasColumnName("content")
+                  .IsRequired();
+
+            entity.Property(e => e.Embedding)
+                  .HasColumnName("embedding")
+                  .HasColumnType("vector(1536)")
+                  .IsRequired();
+
+            entity.Property(e => e.CreatedAt)
+                  .HasColumnName("created_at")
+                  .HasDefaultValueSql("now()");
+
+            entity.HasOne(e => e.Capture)
+                  .WithMany()
+                  .HasForeignKey(e => e.CaptureId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // HNSW index for cosine similarity search
+            entity.HasIndex(e => e.Embedding)
+                  .HasDatabaseName("memories_embedding_hnsw")
+                  .HasMethod("hnsw")
+                  .HasOperators("vector_cosine_ops")
+                  .HasStorageParameter("m", 16)
+                  .HasStorageParameter("ef_construction", 64);
+        });
     }
 }
