@@ -2,20 +2,30 @@
 # Fires when a Claude Code session ends. Posts session metadata to the local
 # AgentMemory server for capture and exits immediately (fire-and-forget).
 #
+# Claude Code invokes this hook with the event payload as JSON on STDIN, not
+# as a command-line argument. The payload includes session_id and, when
+# available, the last assistant message.
+#
 # Environment variables (set in .claude/settings.json or shell):
 #   CLAUDE_MEMORY_SERVER_URL - default http://localhost:5098
-#   CLAUDE_SESSION_ID        - session identifier
+#   CLAUDE_SESSION_ID        - session identifier override (falls back to the
+#                              session_id in the stdin payload)
 
 $serverUrl = $env:CLAUDE_MEMORY_SERVER_URL
 if (-not $serverUrl) { $serverUrl = "http://localhost:5098" }
 
+$stdin = [Console]::In.ReadToEnd()
+$payload = $null
+try { $payload = $stdin | ConvertFrom-Json } catch {}
+
 $sessionId = $env:CLAUDE_SESSION_ID
+if (-not $sessionId -and $payload) { $sessionId = $payload.session_id }
 if (-not $sessionId) { $sessionId = "unknown" }
 
-# Claude Code passes the Stop hook's JSON payload (session id, transcript path, etc.) as
-# the first argument, same as the other hooks. Forward it as-is so the server has whatever
-# session-summary material is available, instead of a fixed placeholder string.
-$rawContent = $args -join " "
+$rawContent = $null
+if ($payload -and ($payload.PSObject.Properties.Name -contains "last_assistant_message")) {
+    $rawContent = $payload.last_assistant_message
+}
 if (-not $rawContent) { $rawContent = "Session ended" }
 
 $body = @{
@@ -30,3 +40,5 @@ try {
 } catch {
     # Silently ignore failures — must not block the agent
 }
+
+exit 0

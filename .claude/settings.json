@@ -1,7 +1,26 @@
 {
   "hooks": {
-    "UserPromptSubmit": "powershell -File hooks/UserPromptSubmit.ps1 \"$input\"",
-    "PostToolUse": "powershell -File hooks/PostToolUse.ps1 \"$input\"",
-    "Stop": "powershell -File hooks/Stop.ps1 \"$input\""
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          { "type": "command", "command": "powershell -File hooks/UserPromptSubmit.ps1" }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          { "type": "command", "command": "powershell -File hooks/PostToolUse.ps1" }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "powershell -File hooks/Stop.ps1" }
+        ]
+      }
+    ]
   }
 }

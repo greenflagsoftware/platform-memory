@@ -1,23 +1,40 @@
 # Claude Code UserPromptSubmit hook — Phase 3 (Retrieval)
 #
 # 1. Fetches semantically relevant memories via /search/context
-# 2. Injects them as context before the prompt (if any are found)
+# 2. Injects them as context before the prompt, via the hookSpecificOutput/
+#    additionalContext stdout contract (NOT plain stdout text — Claude Code
+#    only treats the prompt itself as raw text; context injection requires
+#    the structured JSON envelope below)
 # 3. Posts the (possibly augmented) prompt to /capture/ for storage
 #
-# The context block is written to stdout, which Claude Code interprets as
-# the new prompt — so memories are prepended before the user's actual text.
+# Claude Code invokes this hook with the event payload as JSON on STDIN, not
+# as a command-line argument — there is no "$input" shell variable. The
+# payload includes session_id and a prompt field (seen as either "prompt" or
+# "prompt_text" depending on version), among other fields.
 #
 # Environment variables (set in .claude/settings.json or shell):
 #   CLAUDE_MEMORY_SERVER_URL - default http://localhost:5098
-#   CLAUDE_SESSION_ID        - session identifier
+#   CLAUDE_SESSION_ID        - session identifier override (falls back to the
+#                              session_id in the stdin payload)
 
 $serverUrl = $env:CLAUDE_MEMORY_SERVER_URL
 if (-not $serverUrl) { $serverUrl = "http://localhost:5098" }
 
+$stdin = [Console]::In.ReadToEnd()
+$payload = $null
+try { $payload = $stdin | ConvertFrom-Json } catch {}
+
 $sessionId = $env:CLAUDE_SESSION_ID
+if (-not $sessionId -and $payload) { $sessionId = $payload.session_id }
 if (-not $sessionId) { $sessionId = "unknown" }
 
-$prompt = $args -join " "
+$prompt = $null
+if ($payload) {
+    $propNames = $payload.PSObject.Properties.Name
+    if ($propNames -contains "prompt_text") { $prompt = $payload.prompt_text }
+    elseif ($propNames -contains "prompt") { $prompt = $payload.prompt }
+}
+if (-not $prompt) { $prompt = "" }
 
 # ── Step 1: Fetch relevant context ──────────────────────────────
 $context = $null
@@ -40,12 +57,18 @@ try {
     # Silently ignore — must not block the agent
 }
 
-# ── Step 2: Output augmented prompt ─────────────────────────────
+# ── Step 2: Emit structured context injection ───────────────────
+# Claude Code only injects additional context when stdout is this JSON
+# envelope (exit code 0); arbitrary stdout text is not prepended to the
+# prompt the way earlier versions of this hook assumed.
 if ($context) {
-    # Prepend memories to the prompt so Claude sees relevant past context
-    Write-Output "${context}`n`n---`n`n${prompt}"
-} else {
-    Write-Output $prompt
+    $output = @{
+        hookSpecificOutput = @{
+            hookEventName     = "UserPromptSubmit"
+            additionalContext = $context
+        }
+    } | ConvertTo-Json -Depth 5 -Compress
+    Write-Output $output
 }
 
 # ── Step 3: Fire-and-forget capture (use the ORIGINAL prompt) ───
@@ -66,3 +89,5 @@ try {
 } catch {
     # Silently ignore failures — must not block the agent
 }
+
+exit 0
