@@ -5,6 +5,8 @@ using AgentMemory.Processing;
 using AgentMemory.Retrieval;
 using AgentMemory.Storage;
 using Microsoft.EntityFrameworkCore;
+using ModelContextProtocol.AspNetCore;
+using ModelContextProtocol.Server;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -49,6 +51,19 @@ builder.Services.AddScoped<ICaptureRepository, CaptureRepository>();
 builder.Services.AddScoped<IMemoryRepository, MemoryRepository>();
 builder.Services.AddScoped<IRetrievalService, RetrievalService>();
 
+// ── MCP server (real JSON-RPC/SSE transport) ────────────────────
+// Registered alongside the existing plain HTTP endpoints. The /capture, /admin/*,
+// /search, and /search/context endpoints stay plain HTTP; only agent-facing tools
+// are exposed via the MCP transport. Claude Code connects with:
+//   claude mcp add --transport http http://localhost:5098/mcp
+builder.Services.AddMcpServer()
+    .WithTools<McpTools>()
+    .WithHttpTransport(options =>
+    {
+        // SSE endpoint is /mcp by default (mapped via MapMcp("/mcp") below)
+        // The HttpServerTransportOptions controls session management behavior.
+    });
+
 // ── HTTP pipeline ─────────────────────────────────────────────────
 var app = builder.Build();
 
@@ -84,7 +99,7 @@ app.MapGet("/health", async (AppDbContext db) =>
         {
             status = "healthy",
             service = "agent-memory",
-            version = "0.3.0",
+            version = "0.4.0",
             database = "connected"
         });
     }
@@ -94,7 +109,7 @@ app.MapGet("/health", async (AppDbContext db) =>
         {
             status = "degraded",
             service = "agent-memory",
-            version = "0.3.0",
+            version = "0.4.0",
             database = "unreachable"
         });
     }
@@ -104,6 +119,11 @@ app.MapGet("/health", async (AppDbContext db) =>
 app.MapCaptureEndpoints();
 app.MapAdminEndpoints();
 app.MapSearchEndpoints();
-app.MapMcpToolEndpoints();
+
+// ── MCP HTTP/SSE transport ──────────────────────────────────────
+// Real JSON-RPC MCP transport for auto-discovery by Claude Code.
+// The .WithTools<McpTools>() registration above provides search_memories.
+// Connect via: claude mcp add --transport http http://localhost:5098/mcp
+app.MapMcp("/mcp");
 
 app.Run();
