@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/AgentMemory.Cli/AgentMemory.Cli.csproj" />
+    <Project Path="src/AgentMemory/AgentMemory.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/AgentMemory.Tests/AgentMemory.Tests.csproj" />
+  </Folder>
+</Solution>
