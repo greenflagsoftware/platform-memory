@@ -18,7 +18,7 @@ public class EmbeddingServiceTests
     public EmbeddingServiceTests()
     {
         _config.Setup(c => c["OPENROUTER_API_KEY"]).Returns(ApiKey);
-        _config.Setup(c => c["TYPESAFE_BASE_URL"]).Returns(BaseUrl);
+        _config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
     }
 
     private EmbeddingService CreateService()
@@ -78,7 +78,7 @@ public class EmbeddingServiceTests
         // Arrange
         var config = new Mock<IConfiguration>();
         config.Setup(c => c["OPENROUTER_API_KEY"]).Returns((string?)null);
-        config.Setup(c => c["TYPESAFE_BASE_URL"]).Returns(BaseUrl);
+        config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
 
         var httpClient = _mockHttp.ToHttpClient();
         var service = new EmbeddingService(httpClient, config.Object, _logger.Object);
@@ -104,5 +104,35 @@ public class EmbeddingServiceTests
 
         // Assert
         Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task GenerateEmbeddingAsync_Uses_Configured_Model_Override()
+    {
+        // Arrange
+        var config = new Mock<IConfiguration>();
+        config.Setup(c => c["OPENROUTER_API_KEY"]).Returns(ApiKey);
+        config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
+        config.Setup(c => c["OPENROUTER_EMBEDDING_MODEL"]).Returns("cohere/embed-v4");
+
+        var responseBody = new { data = new[] { new { embedding = new[] { 0.1f } } } };
+        var capturedRequestBody = string.Empty;
+
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/embeddings")
+            .With(req =>
+            {
+                capturedRequestBody = req.Content!.ReadAsStringAsync().Result;
+                return true;
+            })
+            .Respond("application/json", JsonSerializer.Serialize(responseBody));
+
+        var httpClient = _mockHttp.ToHttpClient();
+        var service = new EmbeddingService(httpClient, config.Object, _logger.Object);
+
+        // Act
+        await service.GenerateEmbeddingAsync("Test text");
+
+        // Assert
+        Assert.Contains("cohere/embed-v4", capturedRequestBody);
     }
 }

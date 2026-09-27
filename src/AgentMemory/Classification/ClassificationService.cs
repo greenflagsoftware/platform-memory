@@ -1,19 +1,27 @@
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace AgentMemory.Classification;
 
 /// <summary>
-/// Classifies captured events using JEV (via the OpenRouter-hosted TypeSafe API).
-/// Makes a single API call with two parallel questions:
-///   - Choice: which category best describes this event
-///   - Score: how valuable is this information for future sessions
+/// Classifies captured events with a single OpenRouter chat completion: a JSON-mode
+/// prompt asks for both a category label and a save-worthiness score (0-4) in one call.
+/// Model and base URL are configurable — see appsettings.json's "OpenRouter" section
+/// or the OPENROUTER_* environment variables.
 /// </summary>
 public class ClassificationService : IClassificationService
 {
+    public const string DefaultModel = "openai/gpt-4o-mini";
+    private const string DefaultBaseUrl = "https://openrouter.ai/api";
+
+    private static readonly string[] Categories =
+        ["question", "coding", "tool_call", "decision", "configuration", "other"];
+
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private readonly string _baseUrl;
+    private readonly string _model;
     private readonly ILogger<ClassificationService> _logger;
 
     public ClassificationService(
@@ -25,8 +33,12 @@ public class ClassificationService : IClassificationService
         _apiKey = configuration["OPENROUTER_API_KEY"]
                   ?? configuration["OpenRouter:ApiKey"]
                   ?? string.Empty;
-        _baseUrl = configuration["TYPESAFE_BASE_URL"]
-                   ?? "https://openrouter.ai/api";
+        _baseUrl = configuration["OPENROUTER_BASE_URL"]
+                   ?? configuration["OpenRouter:BaseUrl"]
+                   ?? DefaultBaseUrl;
+        _model = configuration["OPENROUTER_CLASSIFICATION_MODEL"]
+                 ?? configuration["OpenRouter:ClassificationModel"]
+                 ?? DefaultModel;
         _logger = logger;
     }
 
@@ -41,41 +53,48 @@ public class ClassificationService : IClassificationService
         {
             var request = new
             {
-                state = content,
-                model = "jev-latest",
-                questions = new
+                model = _model,
+                response_format = new
                 {
-                    category = new
+                    type = "json_schema",
+                    json_schema = new
                     {
-                        type = "choice",
-                        instructions = "What category best describes this capture event from a coding-agent session?",
-                        criteria = new
+                        name = "capture_classification",
+                        strict = true,
+                        schema = new
                         {
-                            question = "The user is asking a question about the codebase, architecture, or process",
-                            coding = "The agent is writing, editing, or debugging code",
-                            tool_call = "The agent is calling a tool (Read, Glob, Grep, etc.) to explore the codebase",
-                            decision = "A design decision, preference, or rationale was expressed",
-                            configuration = "Configuration, dependency, or environment setup",
-                            other = "None of the above categories fit"
-                        }
-                    },
-                    save_worthiness = new
-                    {
-                        type = "score",
-                        instructions = "How valuable is this information for future coding-agent sessions in the same project? Consider whether it reveals project conventions, architectural decisions, non-obvious gotchas, or important context that would help a future session be more effective.",
-                        criteria = new[]
-                        {
-                            "Not worth saving — trivial or ephemeral",
-                            "Slightly useful — minor context, easy to rediscover",
-                            "Moderately useful — decent project insight, worth indexing",
-                            "Very useful — important project knowledge, would save significant time",
-                            "Essential — critical project context, must remember across sessions"
+                            type = "object",
+                            properties = new
+                            {
+                                category = new { type = "string", @enum = Categories },
+                                save_worthiness = new
+                                {
+                                    type = "number",
+                                    description = "0 = not worth saving, 4 = essential to remember across sessions"
+                                }
+                            },
+                            required = new[] { "category", "save_worthiness" },
+                            additionalProperties = false
                         }
                     }
+                },
+                messages = new object[]
+                {
+                    new
+                    {
+                        role = "system",
+                        content = "You classify one captured event from a coding-agent session. " +
+                                  "Respond with a category — one of: " + string.Join(", ", Categories) +
+                                  " — and a save_worthiness score from 0 to 4 (0 = trivial/ephemeral, " +
+                                  "4 = essential project knowledge that would save significant time in a " +
+                                  "future session). Consider whether the content reveals project " +
+                                  "conventions, architectural decisions, or non-obvious gotchas."
+                    },
+                    new { role = "user", content }
                 }
             };
 
-            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/v1/systemone")
+            var httpRequest = new HttpRequestMessage(HttpMethod.Post, $"{_baseUrl}/v1/chat/completions")
             {
                 Content = JsonContent.Create(request)
             };
@@ -87,62 +106,67 @@ public class ClassificationService : IClassificationService
             var response = await _http.SendAsync(httpRequest, cts.Token);
             response.EnsureSuccessStatusCode();
 
-            var result = await response.Content.ReadFromJsonAsync<JevResponse>(
-                new System.Text.Json.JsonSerializerOptions
-                {
-                    PropertyNameCaseInsensitive = true,
-                    PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.SnakeCaseLower
-                },
+            var result = await response.Content.ReadFromJsonAsync<ChatCompletionResponse>(
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
                 cts.Token);
 
-            if (result?.Answers == null)
+            var messageContent = result?.Choices?.FirstOrDefault()?.Message?.Content;
+            if (string.IsNullOrWhiteSpace(messageContent))
             {
-                return new ClassificationResult("unknown", 0.0, "Empty response from JEV API");
+                return new ClassificationResult("unknown", 0.0, "Empty response from OpenRouter");
             }
 
-            var category = result.Answers.Category?.Choice ?? "unknown";
-            var score = result.Answers.SaveWorthiness?.Score ?? 0.0;
+            var parsed = JsonSerializer.Deserialize<ClassificationPayload>(
+                messageContent,
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = true,
+                    PropertyNamingPolicy = JsonNamingPolicy.SnakeCaseLower
+                });
+
+            if (parsed == null)
+            {
+                return new ClassificationResult("unknown", 0.0, "Could not parse classification JSON");
+            }
+
+            var category = string.IsNullOrWhiteSpace(parsed.Category) ? "unknown" : parsed.Category;
 
             _logger.LogInformation(
                 "Classified capture: category={Category}, score={Score:F2}",
-                category, score);
+                category, parsed.SaveWorthiness);
 
-            return new ClassificationResult(category, score, null);
+            return new ClassificationResult(category, parsed.SaveWorthiness, null);
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("JEV classification timed out after 30s");
+            _logger.LogWarning("Classification timed out after 30s");
             return new ClassificationResult("unknown", 0.0, "Classification timed out");
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "JEV classification failed");
+            _logger.LogError(ex, "Classification failed");
             return new ClassificationResult("unknown", 0.0, $"Classification error: {ex.Message}");
         }
     }
 }
 
-#pragma warning disable IDE1006 // Naming styles — JEV API uses snake_case
-internal class JevResponse
+internal class ChatCompletionResponse
 {
-    public JevAnswers? Answers { get; set; }
+    public ChatChoice[]? Choices { get; set; }
 }
 
-internal class JevAnswers
+internal class ChatChoice
 {
-    public JevChoiceAnswer? Category { get; set; }
-    public JevScoreAnswer? SaveWorthiness { get; set; }
+    public ChatMessage? Message { get; set; }
 }
 
-internal class JevChoiceAnswer
+internal class ChatMessage
 {
-    public string Type { get; set; } = string.Empty;
-    public string Choice { get; set; } = string.Empty;
+    public string? Content { get; set; }
 }
 
-internal class JevScoreAnswer
+internal class ClassificationPayload
 {
-    public string Type { get; set; } = string.Empty;
-    public double Score { get; set; }
+    public string Category { get; set; } = string.Empty;
+    public double SaveWorthiness { get; set; }
 }
-#pragma warning restore IDE1006

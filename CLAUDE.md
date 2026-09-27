@@ -1,5 +1,10 @@
 # AgentMemory — Project Instructions for Claude Code
 
+> **Note:** AgentMemory is a plain HTTP service, not an MCP server with JSON-RPC transport —
+> Claude Code can't auto-discover its tools the way it would a registered MCP server. The
+> `search_memories` endpoint below is surfaced purely through this file's instructions; call
+> it as a normal HTTP request when the "when to use" guidance applies.
+
 ## Available Tools
 
 ### on-demand: search_memories

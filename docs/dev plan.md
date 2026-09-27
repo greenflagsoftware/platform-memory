@@ -1,24 +1,32 @@
 # AgentMemory Development Plan
 
 Status: living document. Update as phases complete or the plan changes — this is not a
-one-time artifact.
+one-time artifact. Phases 0-3 (below) have shipped; this revision closes out the open
+questions raised during a post-implementation review and documents the fixes applied
+alongside that review (see "Post-implementation fixes" at the end of the Phase Plan).
 
 ## What this project does
 
 AgentMemory is a local sidecar service that gives coding-agent sessions (starting with
 Claude Code) durable, cross-session memory. Project-local Claude Code hooks fire non-blocking
-HTTP calls to an ASP.NET Core MCP server whenever the agent submits a prompt, calls a tool, or
+HTTP calls to an ASP.NET Core server whenever the agent submits a prompt, calls a tool, or
 ends a session. The server classifies each captured event with an LLM call (via OpenRouter) —
 deciding whether it's worth remembering, and tagging it with a category (question, coding,
 tool call, etc.) and a save-worthiness score — then embeds and stores anything that clears a
-configurable threshold in PostgreSQL (pgvector). Retrieval (querying stored memories back into
-a session) is out of scope for v0.1; this phase is capture-and-classify only.
+configurable threshold in PostgreSQL (pgvector). Retrieval now exists too (Phase 3): a
+`UserPromptSubmit` hook injects relevant past memories as context, and an on-demand search
+endpoint is documented in `CLAUDE.md` for the agent to call directly.
+
+Note on naming: the server is a plain ASP.NET Core HTTP API, not an MCP server with JSON-RPC
+transport — Claude Code cannot auto-discover its endpoints as MCP tools. Its `/tools/*`
+endpoints are surfaced to the agent only through `CLAUDE.md`'s instructions. See "Known
+limitations" below.
 
 ## Scope
 
 - In scope for v0.1:
-  - ASP.NET Core MCP server (HTTP transport) that accepts capture events and returns
-    immediately (202-style non-blocking response).
+  - ASP.NET Core HTTP API that accepts capture events and returns immediately (202-style
+    non-blocking response).
   - In-process async classification: one OpenRouter call per event that returns both a
     category label and a save-worthiness score (JSON-mode prompt, parsed by the server).
   - In-process embedding generation via OpenRouter for events that clear the threshold.
@@ -29,9 +37,9 @@ a session) is out of scope for v0.1; this phase is capture-and-classify only.
     classification, running migrations) — not on the hot request path.
   - `docker-compose.yml` running the server + a Postgres/pgvector service together for local
     dev; a single Dockerfile publishing server + CLI into one image.
-- Explicitly deferred:
-  - Any retrieval path (search/query MCP tool, or a hook that injects past memories back into
-    a session).
+- Explicitly deferred (shipped in Phase 3, see below — kept here for the v0.1 scope record):
+  - ~~Any retrieval path (search/query tool, or a hook that injects past memories back into a
+    session).~~
   - Hooks installed outside this project folder (global/system-wide hook registration).
   - Multi-agent or multi-project support — v0.1 assumes one project's worth of memory.
   - Queue-backed/durable background processing — v0.1 does classification+embedding as an
@@ -44,20 +52,21 @@ thin-MCP-transport shape, Dockerized sidecar, docker-compose for standalone loca
 without the VTC-specific parts (no `CapabilityModule` naming prefix, no `module.manifest.json`,
 no entitlement-by-running-container concept — there is no VTC host here). One deviation from
 the template: because this server sits on a latency-sensitive hook path, classification and
-storage logic live **in the MCP server itself**, not behind a CLI subprocess call per request.
+storage logic live **in the HTTP server itself**, not behind a CLI subprocess call per request.
 The CLI is a separate, thin client for manual/admin operations only.
 
 ```
-src/AgentMemory/              ASP.NET Core MCP server (HTTP transport)
-  Capture/                    Capture endpoint(s): accept event payload, return immediately,
-                               continue classify+embed+store in a background Task
+src/AgentMemory/              ASP.NET Core HTTP API (see "Known limitations" re: not real MCP)
+  Capture/                    Capture, admin, search, and tool endpoints
   Classification/             OpenRouter client, prompt construction, JSON response parsing,
                                threshold comparison
-  Storage/                    EF Core (or Dapper) + pgvector access
-  Program.cs                  MCP HTTP transport + /health wiring
+  Embedding/                  OpenRouter embeddings client
+  Processing/                 CaptureProcessor: classify -> threshold -> embed -> store
+  Retrieval/                  Semantic search over stored memories
+  Storage/                    EF Core + pgvector access, migrations
+  Program.cs                  HTTP pipeline + /health wiring
 src/AgentMemory.Cli/          Admin/manual entry point — not on the hot path
-  Commands/                   e.g. query stored memories, re-classify a capture, apply
-                               migrations
+  Commands/                   list-memories, re-classify, migrate
   Program.cs                  Dispatches argv[0] to the matching command
 tests/AgentMemory.Tests/      Unit tests for classification/threshold logic (mocked
                                OpenRouter), payload parsing, prompt construction
@@ -81,16 +90,28 @@ docker-compose.yml            Server + Postgres/pgvector, for local dev
    score via a JSON-mode prompt). If the score clears the configured threshold, a second
    OpenRouter call generates an embedding for the content, and both the raw capture and the
    classified/embedded memory are written to Postgres. If the score doesn't clear the
-   threshold, only the raw capture is kept (or discarded, per the retention question below —
-   flagged as an open question).
+   threshold, only the raw capture is kept — see "Resolved decisions" below.
 
-### Open questions to resolve during Phase 1
+### Resolved decisions
 
-- Exact OpenRouter models to use for classification vs. embeddings (cost/latency/quality
-  tradeoff), and whether one model can do both in a single call.
-- Retention policy for events that don't clear the save threshold: keep the raw capture row
-  for later re-classification/tuning, or discard it entirely.
-- Threshold value(s) — likely need tuning per category rather than one global cutoff.
+These were open questions during Phase 1; closed during the post-implementation review.
+
+- **OpenRouter models.** Classification uses `openai/gpt-4o-mini` (chat completions,
+  `response_format: json_schema`, one call returns both category and save-worthiness score).
+  Embeddings use `openai/text-embedding-3-small` (1536 dimensions, matching the `memories`
+  table's `vector(1536)` column). Both are **configurable**, not hardcoded: set
+  `OPENROUTER_CLASSIFICATION_MODEL` / `OPENROUTER_EMBEDDING_MODEL` (or the equivalent
+  `OpenRouter:ClassificationModel` / `OpenRouter:EmbeddingModel` config keys) to change them.
+  Switching the embedding model to one with a different output dimension requires a migration
+  updating the `memories.embedding` column type to match.
+- **Retention policy.** Below-threshold captures are kept in `captures` (never deleted), just
+  never promoted to `memories`. This keeps the door open for re-classification after a
+  threshold or model change (see `POST /admin/captures/{id}/reclassify` and the CLI's
+  `re-classify` command) without having to re-run the hook.
+- **Threshold scope.** v0.1 ships one configurable global save-worthiness threshold
+  (`Memory:SaveThreshold` / `Memory__SaveThreshold`, default `0.5` on a 0-4 score scale).
+  Per-category thresholds are deferred to a later phase — not implemented, and not currently
+  on the Phase Plan below.
 
 ## Draft Postgres schema (pgvector)
 
@@ -161,14 +182,61 @@ CREATE INDEX memories_embedding_hnsw
 ### Phase 3 — Retrieval
 
 - Deliverable: semantic search endpoint (`POST /search`), context-injection endpoint
-  (`POST /search/context`), and an MCP-style on-demand tool (`POST /tools/search-memories`).
-  The `UserPromptSubmit` hook fetches relevant memories before each prompt and injects them
-  as `<relevant_memories>` context. A `CLAUDE.md` file tells the agent about the on-demand
-  tool and the automatic injection.
+  (`POST /search/context`), and an on-demand tool endpoint (`POST /tools/search-memories`,
+  surfaced to the agent via `CLAUDE.md` instructions rather than MCP auto-discovery — see
+  "Known limitations"). The `UserPromptSubmit` hook fetches relevant memories before each
+  prompt and injects them as `<relevant_memories>` context.
 - Exit criteria: a `UserPromptSubmit` hook call prepends semantically related memories before
   the user prompt reaches Claude Code; an explicit `/tools/search-memories` call returns
   relevant results; all retrieval paths gracefully handle missing API keys and embedding
   failures (return empty, never throw).
+
+### Post-implementation fixes
+
+Gaps found in a post-implementation review, closed in this pass:
+
+- **Dockerfile now publishes the CLI.** It previously published only the server. It now
+  publishes both projects into the runtime image (server as the entrypoint, CLI under
+  `/app/cli`, run via `docker compose exec server dotnet /app/cli/AgentMemory.Cli.dll <command>`).
+- **CLI gained `re-classify <id>` and `migrate`.** Both were listed in this plan's Scope but
+  missing. `re-classify` calls the new `POST /admin/captures/{id}/reclassify` endpoint;
+  `migrate` calls the new `POST /admin/migrate` endpoint.
+- **Real EF Core migrations replace `EnsureCreated`/`EnsureDeleted`.** The server previously
+  dropped and recreated its schema on every dev-mode startup, which made "apply migrations"
+  meaningless — there were none. An `InitialCreate` migration now exists
+  (`src/AgentMemory/Migrations/`), and the server calls `Database.MigrateAsync()` on startup
+  in every environment; `POST /admin/migrate` applies pending migrations on demand without a
+  restart.
+- **Classification actually calls OpenRouter now.** The original implementation sent a
+  TypeSafe-shaped request (`state`/`questions` with `choice`/`score` primitives) to a
+  `/v1/systemone` path that doesn't exist on OpenRouter — a leftover from when this project's
+  interview considered routing Jev (TypeSafe's own model) through OpenRouter. Per the decision
+  to use OpenRouter directly instead (see the Reference section), classification is now a
+  standard OpenRouter chat-completions call with a JSON-schema `response_format`.
+- **Fixed a scoped-service lifetime bug in the capture endpoint.** The background
+  classify/embed/store `Task` was capturing the HTTP request's scoped `CaptureProcessor`
+  directly; that scope (and its `AppDbContext`) can be disposed before the background task
+  runs, risking an `ObjectDisposedException` under load. It now creates its own
+  `IServiceScopeFactory`-backed scope inside the background task.
+- **`Stop` hook no longer hardcodes `raw_content`.** It previously always sent `"Session
+  ended"`. It now forwards whatever Claude Code passes as the hook's payload (matching the
+  `PostToolUse` hook's existing convention), falling back to the placeholder only if nothing
+  is passed.
+
+## Known limitations
+
+- **Not a real MCP server.** `/tools/search-memories` and the automatic context-injection hook
+  are the only "tool" surface; there's no MCP JSON-RPC transport, so Claude Code can't
+  auto-discover or negotiate this the way it would a registered MCP server. Everything the
+  agent knows about these endpoints comes from `CLAUDE.md`'s instructions. Revisit if/when a
+  real `ModelContextProtocol.AspNetCore`-based transport is worth the effort.
+- **Hooks read `$args`, not Claude Code's documented stdin JSON contract.** Claude Code hooks
+  are typically invoked with a JSON payload on stdin (session id, transcript path, etc.); the
+  hooks here (`.claude/settings.json`) pass `"$input"` as a single command-line argument
+  instead. This works for the current PowerShell scripts but hasn't been reconciled against
+  Claude Code's actual hook invocation contract — worth verifying end-to-end (not just via the
+  `/capture` payloads arriving correctly) before relying on it more heavily, e.g. for the
+  `Stop` hook's transcript-based summaries.
 
 ## Reference
 

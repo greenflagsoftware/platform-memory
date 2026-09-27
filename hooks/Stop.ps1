@@ -12,10 +12,16 @@ if (-not $serverUrl) { $serverUrl = "http://localhost:5098" }
 $sessionId = $env:CLAUDE_SESSION_ID
 if (-not $sessionId) { $sessionId = "unknown" }
 
+# Claude Code passes the Stop hook's JSON payload (session id, transcript path, etc.) as
+# the first argument, same as the other hooks. Forward it as-is so the server has whatever
+# session-summary material is available, instead of a fixed placeholder string.
+$rawContent = $args -join " "
+if (-not $rawContent) { $rawContent = "Session ended" }
+
 $body = @{
     session_id  = $sessionId
     hook_event  = "Stop"
-    raw_content = "Session ended"
+    raw_content = $rawContent
     metadata    = @{timestamp = (Get-Date -Format "o")} | ConvertTo-Json
 } | ConvertTo-Json
 

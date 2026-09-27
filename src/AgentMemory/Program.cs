@@ -52,8 +52,10 @@ builder.Services.AddScoped<IRetrievalService, RetrievalService>();
 // ── HTTP pipeline ─────────────────────────────────────────────────
 var app = builder.Build();
 
-// ── Database initialization (development-only; use migrations in production) ──
-if (app.Environment.IsDevelopment())
+// ── Database initialization: bootstrap pgvector, then apply EF Core migrations ──
+// Runs in every environment so `docker compose up` and a bare `dotnet run` both end up
+// with a current schema; see POST /admin/migrate for applying migrations on demand
+// instead (e.g. deploys where auto-migrate-on-startup is turned off).
 {
     // Step 1: Bootstrap the pgvector extension before EF Core validates its model.
     var connString = app.Configuration.GetConnectionString("DefaultConnection");
@@ -65,11 +67,10 @@ if (app.Environment.IsDevelopment())
         await cmd.ExecuteNonQueryAsync();
     }
 
-    // Step 2: Recreate schema for dev (EnsureCreatedAsync is a no-op on existing tables).
+    // Step 2: Apply pending migrations.
     using var scope = app.Services.CreateScope();
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-    await db.Database.EnsureDeletedAsync();
-    await db.Database.EnsureCreatedAsync();
+    await db.Database.MigrateAsync();
 }
 
 // ── Endpoints ─────────────────────────────────────────────────────

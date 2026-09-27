@@ -9,11 +9,14 @@ namespace AgentMemory.Embedding;
 /// </summary>
 public class EmbeddingService : IEmbeddingService
 {
+    public const string DefaultModel = "openai/text-embedding-3-small";
+    private const string DefaultBaseUrl = "https://openrouter.ai/api";
+
     private readonly HttpClient _http;
     private readonly string _apiKey;
     private readonly string _baseUrl;
+    private readonly string _model;
     private readonly ILogger<EmbeddingService> _logger;
-    private const string DefaultModel = "text-embedding-3-small";
 
     public EmbeddingService(
         HttpClient http,
@@ -24,8 +27,12 @@ public class EmbeddingService : IEmbeddingService
         _apiKey = configuration["OPENROUTER_API_KEY"]
                   ?? configuration["OpenRouter:ApiKey"]
                   ?? string.Empty;
-        _baseUrl = configuration["TYPESAFE_BASE_URL"]
-                   ?? "https://openrouter.ai/api";
+        _baseUrl = configuration["OPENROUTER_BASE_URL"]
+                   ?? configuration["OpenRouter:BaseUrl"]
+                   ?? DefaultBaseUrl;
+        _model = configuration["OPENROUTER_EMBEDDING_MODEL"]
+                 ?? configuration["OpenRouter:EmbeddingModel"]
+                 ?? DefaultModel;
         _logger = logger;
     }
 
@@ -41,7 +48,7 @@ public class EmbeddingService : IEmbeddingService
         {
             var request = new
             {
-                model = DefaultModel,
+                model = _model,
                 input = text
             };
 

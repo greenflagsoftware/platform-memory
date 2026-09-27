@@ -16,7 +16,7 @@ public static class CaptureEndpoints
         var group = app.MapGroup("/capture");
 
         group.MapPost("/", async (CaptureRequest request, AppDbContext db,
-            CaptureProcessor processor, ILogger<CaptureRequest> logger) =>
+            IServiceScopeFactory scopeFactory, ILogger<CaptureRequest> logger) =>
         {
             var record = new CaptureRecord
             {
@@ -37,14 +37,17 @@ public static class CaptureEndpoints
                 "Captured event {HookEvent} for session {SessionId} (id={CaptureId})",
                 record.HookEvent, record.SessionId, captureId);
 
-            // Fire-and-forget background classification + embedding + storage.
-            // Captures the CancellationToken from the HTTP request at the time of creation,
-            // but processing runs independently — the HTTP response is not gated on it.
+            // Fire-and-forget background classification + embedding + storage. This runs
+            // after the HTTP response is sent, by which point the request's own DI scope
+            // (and its scoped AppDbContext/CaptureProcessor) will have been disposed — so a
+            // fresh scope is created here rather than reusing the request's injected services.
             _ = Task.Run(async () =>
             {
+                using var scope = scopeFactory.CreateScope();
+                var scopedProcessor = scope.ServiceProvider.GetRequiredService<CaptureProcessor>();
                 try
                 {
-                    await processor.ProcessCaptureAsync(captureId);
+                    await scopedProcessor.ProcessCaptureAsync(captureId);
                 }
                 catch (Exception ex)
                 {

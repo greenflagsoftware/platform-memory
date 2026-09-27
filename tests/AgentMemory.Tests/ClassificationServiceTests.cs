@@ -18,7 +18,7 @@ public class ClassificationServiceTests
     public ClassificationServiceTests()
     {
         _config.Setup(c => c["OPENROUTER_API_KEY"]).Returns(ApiKey);
-        _config.Setup(c => c["TYPESAFE_BASE_URL"]).Returns(BaseUrl);
+        _config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
     }
 
     private ClassificationService CreateService()
@@ -27,36 +27,24 @@ public class ClassificationServiceTests
         return new ClassificationService(httpClient, _config.Object, _logger.Object);
     }
 
+    private static string ChatCompletionResponseWith(string payloadJson) => JsonSerializer.Serialize(new
+    {
+        id = "gen-123",
+        model = ClassificationService.DefaultModel,
+        choices = new[]
+        {
+            new { message = new { role = "assistant", content = payloadJson } }
+        }
+    });
+
     [Fact]
     public async Task ClassifyAsync_Returns_Category_And_Score_On_Success()
     {
         // Arrange
-        var responseBody = new
-        {
-            model = "jev-1.13.0",
-            answers = new
-            {
-                category = new
-                {
-                    type = "choice",
-                    choice = "decision",
-                    probabilities = new { decision = 0.85, question = 0.10, coding = 0.05 },
-                    confidence = 0.80
-                },
-                save_worthiness = new
-                {
-                    type = "score",
-                    score = 2.5,
-                    legend = new[] { "Not worth saving", "Slightly useful", "Moderately useful", "Very useful", "Essential" },
-                    probabilities = new { _0 = 0.0, _1 = 0.0, _2 = 0.5, _3 = 0.5, _4 = 0.0 },
-                    confidence = 0.90
-                }
-            },
-            usage = new { input_tokens = 300, output_tokens = 20 }
-        };
+        var payload = JsonSerializer.Serialize(new { category = "decision", save_worthiness = 2.5 });
 
-        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/systemone")
-            .Respond("application/json", JsonSerializer.Serialize(responseBody));
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/chat/completions")
+            .Respond("application/json", ChatCompletionResponseWith(payload));
 
         var service = CreateService();
 
@@ -73,7 +61,7 @@ public class ClassificationServiceTests
     public async Task ClassifyAsync_Returns_Unknown_On_Empty_Response()
     {
         // Arrange
-        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/systemone")
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/chat/completions")
             .Respond("application/json", "{}");
 
         var service = CreateService();
@@ -88,12 +76,11 @@ public class ClassificationServiceTests
     }
 
     [Fact]
-    public async Task ClassifyAsync_Returns_Unknown_On_No_Answers()
+    public async Task ClassifyAsync_Returns_Unknown_On_Unparseable_Content()
     {
         // Arrange
-        var responseBody = new { model = "jev-1.13.0", answers = (object?)null };
-        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/systemone")
-            .Respond("application/json", JsonSerializer.Serialize(responseBody));
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/chat/completions")
+            .Respond("application/json", ChatCompletionResponseWith("not json"));
 
         var service = CreateService();
 
@@ -111,7 +98,7 @@ public class ClassificationServiceTests
         // Arrange
         var config = new Mock<IConfiguration>();
         config.Setup(c => c["OPENROUTER_API_KEY"]).Returns((string?)null);
-        config.Setup(c => c["TYPESAFE_BASE_URL"]).Returns(BaseUrl);
+        config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
 
         var httpClient = _mockHttp.ToHttpClient();
         var service = new ClassificationService(httpClient, config.Object, _logger.Object);
@@ -129,7 +116,7 @@ public class ClassificationServiceTests
     public async Task ClassifyAsync_Returns_Error_On_Http_Error()
     {
         // Arrange
-        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/systemone")
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/chat/completions")
             .Respond(System.Net.HttpStatusCode.InternalServerError);
 
         var service = CreateService();
@@ -140,5 +127,35 @@ public class ClassificationServiceTests
         // Assert
         Assert.Equal("unknown", result.Category);
         Assert.NotNull(result.Error);
+    }
+
+    [Fact]
+    public async Task ClassifyAsync_Uses_Configured_Model_Override()
+    {
+        // Arrange
+        var config = new Mock<IConfiguration>();
+        config.Setup(c => c["OPENROUTER_API_KEY"]).Returns(ApiKey);
+        config.Setup(c => c["OPENROUTER_BASE_URL"]).Returns(BaseUrl);
+        config.Setup(c => c["OPENROUTER_CLASSIFICATION_MODEL"]).Returns("anthropic/claude-haiku-4.5");
+
+        var payload = JsonSerializer.Serialize(new { category = "coding", save_worthiness = 1.0 });
+        var capturedRequestBody = string.Empty;
+
+        _mockHttp.Expect(HttpMethod.Post, $"{BaseUrl}/v1/chat/completions")
+            .With(req =>
+            {
+                capturedRequestBody = req.Content!.ReadAsStringAsync().Result;
+                return true;
+            })
+            .Respond("application/json", ChatCompletionResponseWith(payload));
+
+        var httpClient = _mockHttp.ToHttpClient();
+        var service = new ClassificationService(httpClient, config.Object, _logger.Object);
+
+        // Act
+        await service.ClassifyAsync("Some content");
+
+        // Assert
+        Assert.Contains("anthropic/claude-haiku-4.5", capturedRequestBody);
     }
 }
