@@ -88,6 +88,9 @@ var app = builder.Build();
     await db.Database.MigrateAsync();
 }
 
+// ── Static dashboard (wwwroot/dashboard.html, served at /dashboard.html) ──
+app.UseStaticFiles();
+
 // ── Endpoints ─────────────────────────────────────────────────────
 app.MapGet("/health", async (AppDbContext db) =>
 {

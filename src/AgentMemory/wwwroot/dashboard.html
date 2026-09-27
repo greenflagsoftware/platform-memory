@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Memory Bench</title>
+<style>
+:root {
+  --ink: #1c1b1a;
+  --paper: #faf9f7;
+  --panel: #ffffff;
+  --line: #e4e1db;
+  --muted: #6b6560;
+  --accent: #7a5cff;
+  --accent-soft: #efeaff;
+  --decision: #2f6b4f;
+  --decision-bg: #e6f2ec;
+  --question: #a3690f;
+  --question-bg: #fbeed9;
+  --tool_call: #3a63b8;
+  --tool_call-bg: #e8eefb;
+  --configuration: #8a4fb0;
+  --configuration-bg: #f3e8fa;
+  --other: #6b6560;
+  --other-bg: #ececea;
+  --danger: #b3423a;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #ece9e4;
+    --paper: #17161a;
+    --panel: #201f24;
+    --line: #34323a;
+    --muted: #9b968f;
+    --accent: #a58bff;
+    --accent-soft: #2a2440;
+    --decision: #7fd3ab;
+    --decision-bg: #163027;
+    --question: #f0b458;
+    --question-bg: #362a13;
+    --tool_call: #8fb3ff;
+    --tool_call-bg: #1c2740;
+    --configuration: #d6a8f2;
+    --configuration-bg: #2e2338;
+    --other: #9b968f;
+    --other-bg: #2a2830;
+    --danger: #e28981;
+    color-scheme: dark;
+  }
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: "Inter", system-ui, sans-serif;
+  padding: 24px 16px 40px;
+  display: flex;
+  justify-content: center;
+}
+.wrap { width: 100%; max-width: 880px; }
+
+.masthead {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  border-bottom: 2px solid var(--ink);
+  padding-bottom: 12px;
+  margin-bottom: 18px;
+}
+h1 {
+  font-family: "Fraunces", Georgia, serif;
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0;
+  letter-spacing: -0.01em;
+}
+.endpoint {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.statline {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 18px;
+}
+.stat {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 14px;
+  min-width: 92px;
+  flex: 1 1 92px;
+}
+.stat .n {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.1;
+}
+.stat .l {
+  font-size: 11px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-top: 3px;
+}
+
+.controls {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+.search-row {
+  display: flex;
+  gap: 8px;
+  flex: 1 1 260px;
+}
+input[type="text"] {
+  flex: 1;
+  font-family: inherit;
+  font-size: 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+}
+input[type="text"]:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+button {
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 9px 14px;
+  border-radius: 8px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--ink);
+  cursor: pointer;
+}
+button.primary {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+button:hover { filter: brightness(0.97); }
+@media (prefers-color-scheme: dark) {
+  button:hover { filter: brightness(1.15); }
+}
+
+.chips {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 12px 0 16px;
+}
+.chip {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 5px 11px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+.chip[data-active="true"] {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.status {
+  font-size: 13px;
+  color: var(--muted);
+  min-height: 18px;
+  margin-bottom: 10px;
+}
+.status.err { color: var(--danger); }
+
+.list { display: flex; flex-direction: column; gap: 10px; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 14px 16px;
+}
+.card-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.tag-group { display: flex; align-items: center; gap: 8px; }
+.tag {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 3px 9px;
+  border-radius: 999px;
+}
+.tag.decision { color: var(--decision); background: var(--decision-bg); }
+.tag.question { color: var(--question); background: var(--question-bg); }
+.tag.tool_call { color: var(--tool_call); background: var(--tool_call-bg); }
+.tag.configuration { color: var(--configuration); background: var(--configuration-bg); }
+.tag.other { color: var(--other); background: var(--other-bg); }
+
+.meta {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-size: 11px;
+  color: var(--muted);
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.sim {
+  font-weight: 700;
+  color: var(--accent);
+}
+.content {
+  font-size: 14.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+}
+.empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 50px 20px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  font-size: 14px;
+}
+.spin {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border-radius: 50%;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  animation: sp .7s linear infinite;
+  vertical-align: -2px;
+  margin-right: 6px;
+}
+@keyframes sp { to { transform: rotate(360deg); } }
+</style>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@500;600&display=swap">
+</head>
+<body>
+<div class="wrap">
+  <div class="masthead">
+    <h1>Memory Bench</h1>
+    <div class="endpoint" id="endpointLabel"></div>
+  </div>
+
+  <div class="statline" id="statline">
+    <div class="stat"><div class="n">&mdash;</div><div class="l">total shown</div></div>
+    <div class="stat"><div class="n">&mdash;</div><div class="l">decisions</div></div>
+    <div class="stat"><div class="n">&mdash;</div><div class="l">questions</div></div>
+    <div class="stat"><div class="n">&mdash;</div><div class="l">latest</div></div>
+  </div>
+
+  <div class="controls">
+    <div class="search-row">
+      <input type="text" id="searchInput" placeholder="Semantic search — e.g. &quot;why is search returning nothing&quot;">
+      <button class="primary" id="searchBtn">Search</button>
+      <button id="clearBtn">Browse all</button>
+    </div>
+    <button id="refreshBtn" title="Reload from server">&#8635; Refresh</button>
+  </div>
+
+  <div class="chips" id="categoryChips"></div>
+
+  <div class="status" id="status">Loading&hellip;</div>
+  <div class="list" id="list"></div>
+</div>
+
+<script>
+const API = ""; // same origin as this page — served by the AgentMemory server itself
+const CATEGORIES = ["decision", "question", "tool_call", "configuration", "other"];
+let activeCategory = null;
+let mode = "browse"; // "browse" | "search"
+let lastQuery = "";
+
+const el = {
+  status: document.getElementById("status"),
+  list: document.getElementById("list"),
+  statline: document.getElementById("statline"),
+  chips: document.getElementById("categoryChips"),
+  input: document.getElementById("searchInput"),
+  searchBtn: document.getElementById("searchBtn"),
+  clearBtn: document.getElementById("clearBtn"),
+  refreshBtn: document.getElementById("refreshBtn"),
+  endpointLabel: document.getElementById("endpointLabel"),
+};
+
+el.endpointLabel.textContent = location.origin;
+
+function renderChips() {
+  el.chips.innerHTML = "";
+  const allChip = document.createElement("div");
+  allChip.className = "chip";
+  allChip.textContent = "All categories";
+  allChip.dataset.active = String(activeCategory === null);
+  allChip.addEventListener("click", () => { activeCategory = null; load(); });
+  el.chips.appendChild(allChip);
+
+  for (const cat of CATEGORIES) {
+    const chip = document.createElement("div");
+    chip.className = "chip";
+    chip.textContent = cat.replace("_", " ");
+    chip.dataset.active = String(activeCategory === cat);
+    chip.addEventListener("click", () => { activeCategory = cat; load(); });
+    el.chips.appendChild(chip);
+  }
+}
+
+function fmtTime(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  } catch { return iso; }
+}
+
+function renderStats(items) {
+  const counts = { decision: 0, question: 0 };
+  let latest = null;
+  for (const m of items) {
+    if (counts[m.category] !== undefined) counts[m.category]++;
+    const created = m.createdAt || m.created_at;
+    if (!latest || new Date(created) > new Date(latest)) latest = created;
+  }
+  const stats = [
+    [items.length, "total shown"],
+    [counts.decision, "decisions"],
+    [counts.question, "questions"],
+    [latest ? fmtTime(latest) : "—", "latest"],
+  ];
+  el.statline.innerHTML = stats.map(([n, l]) =>
+    `<div class="stat"><div class="n">${n}</div><div class="l">${l}</div></div>`
+  ).join("");
+}
+
+function renderList(items, opts) {
+  opts = opts || {};
+  if (items.length === 0) {
+    el.list.innerHTML = `<div class="empty">No memories ${opts.searching ? "match that search" : "found"}${activeCategory ? ` in <strong>${activeCategory}</strong>` : ""}.</div>`;
+    return;
+  }
+  el.list.innerHTML = items.map(m => {
+    const cat = m.category || "other";
+    const created = fmtTime(m.createdAt || m.created_at);
+    const sim = (typeof m.similarity === "number")
+      ? `<span class="sim">${(m.similarity * 100).toFixed(0)}% match</span>`
+      : "";
+    return `
+      <div class="card">
+        <div class="card-top">
+          <div class="tag-group">
+            <span class="tag ${cat}">${cat.replace("_", " ")}</span>
+          </div>
+          <div class="meta">${sim}<span>#${m.id}</span><span>${created}</span></div>
+        </div>
+        <div class="content">${escapeHtml(m.content)}</div>
+      </div>`;
+  }).join("");
+}
+
+function escapeHtml(s) {
+  const d = document.createElement("div");
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function setStatus(text, isErr) {
+  el.status.textContent = text;
+  el.status.className = "status" + (isErr ? " err" : "");
+}
+
+function setStatusLoading() {
+  el.status.innerHTML = `<span class="spin"></span>Loading&hellip;`;
+  el.status.className = "status";
+}
+
+async function load() {
+  renderChips();
+  mode = "browse";
+  setStatusLoading();
+  try {
+    const url = new URL(API + "/admin/memories", location.origin);
+    url.searchParams.set("limit", "50");
+    if (activeCategory) url.searchParams.set("category", activeCategory);
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const items = await res.json();
+    setStatus(`Showing ${items.length} most recent${activeCategory ? " " + activeCategory : ""} memories.`);
+    renderStats(items);
+    renderList(items, {});
+  } catch (err) {
+    handleFetchError(err);
+  }
+}
+
+async function runSearch() {
+  const q = el.input.value.trim();
+  if (!q) { load(); return; }
+  mode = "search";
+  lastQuery = q;
+  setStatusLoading();
+  try {
+    const body = { query: q, limit: 20, min_similarity: 0.3 };
+    if (activeCategory) body.category = activeCategory;
+    const res = await fetch(API + "/search/", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const data = await res.json();
+    const items = data.results || [];
+    setStatus(`${items.length} result${items.length === 1 ? "" : "s"} for "${q}"${activeCategory ? " in " + activeCategory : ""}.`);
+    renderStats(items);
+    renderList(items, { searching: true });
+  } catch (err) {
+    handleFetchError(err);
+  }
+}
+
+function handleFetchError(err) {
+  setStatus(
+    `Could not load memories — ${err.message}. Make sure the AgentMemory container is running (docker compose up -d).`,
+    true
+  );
+  el.list.innerHTML = "";
+  el.statline.querySelectorAll(".n").forEach(n => n.textContent = "—");
+}
+
+el.searchBtn.addEventListener("click", runSearch);
+el.input.addEventListener("keydown", (e) => { if (e.key === "Enter") runSearch(); });
+el.clearBtn.addEventListener("click", () => { el.input.value = ""; load(); });
+el.refreshBtn.addEventListener("click", () => { mode === "search" && lastQuery ? runSearch() : load(); });
+
+renderChips();
+load();
+</script>
+</body>
+</html>
