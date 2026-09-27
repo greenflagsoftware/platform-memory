@@ -158,11 +158,17 @@ CREATE INDEX memories_embedding_hnsw
 - Exit criteria: the server fails predictably (logged, capture still recorded) rather than
   losing data silently or blocking the hook on external-service errors.
 
-### Phase 3 — Retrieval (future, out of scope for v0.1)
+### Phase 3 — Retrieval
 
-- Not planned in detail yet. Will need a query/search MCP tool or hook, and a decision on how
-  retrieved memories get surfaced back into a session (injected context, a queryable tool the
-  agent calls on demand, etc.).
+- Deliverable: semantic search endpoint (`POST /search`), context-injection endpoint
+  (`POST /search/context`), and an MCP-style on-demand tool (`POST /tools/search-memories`).
+  The `UserPromptSubmit` hook fetches relevant memories before each prompt and injects them
+  as `<relevant_memories>` context. A `CLAUDE.md` file tells the agent about the on-demand
+  tool and the automatic injection.
+- Exit criteria: a `UserPromptSubmit` hook call prepends semantically related memories before
+  the user prompt reaches Claude Code; an explicit `/tools/search-memories` call returns
+  relevant results; all retrieval paths gracefully handle missing API keys and embedding
+  failures (return empty, never throw).
 
 ## Reference
 

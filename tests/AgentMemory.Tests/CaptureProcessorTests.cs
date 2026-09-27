@@ -187,4 +187,27 @@ public class InMemoryMemoryRepository : IMemoryRepository
         Memories[memory.Id] = memory;
         return Task.CompletedTask;
     }
+
+    public Task<IReadOnlyList<MemorySearchResult>> SearchMemoriesAsync(
+        Pgvector.Vector queryEmbedding,
+        int limit = 5,
+        double minSimilarity = 0.7,
+        string? category = null,
+        CancellationToken ct = default)
+    {
+        var results = Memories.Values
+            .Where(m => category == null || m.Category == category)
+            .Select(m => new MemorySearchResult(
+                m.Id,
+                m.Category,
+                m.Score,
+                m.Content,
+                m.CreatedAt,
+                1.0  // Stub: always return max similarity for tests
+            ))
+            .Take(limit)
+            .ToList() as IReadOnlyList<MemorySearchResult> ?? Array.Empty<MemorySearchResult>();
+
+        return Task.FromResult(results);
+    }
 }

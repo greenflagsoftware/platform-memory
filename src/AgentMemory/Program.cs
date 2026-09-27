@@ -2,6 +2,7 @@ using AgentMemory.Capture;
 using AgentMemory.Classification;
 using AgentMemory.Embedding;
 using AgentMemory.Processing;
+using AgentMemory.Retrieval;
 using AgentMemory.Storage;
 using Microsoft.EntityFrameworkCore;
 
@@ -46,6 +47,7 @@ builder.Services.AddHttpClient<IEmbeddingService, EmbeddingService>(client => { 
 builder.Services.AddScoped<CaptureProcessor>();
 builder.Services.AddScoped<ICaptureRepository, CaptureRepository>();
 builder.Services.AddScoped<IMemoryRepository, MemoryRepository>();
+builder.Services.AddScoped<IRetrievalService, RetrievalService>();
 
 // ── HTTP pipeline ─────────────────────────────────────────────────
 var app = builder.Build();
@@ -81,7 +83,7 @@ app.MapGet("/health", async (AppDbContext db) =>
         {
             status = "healthy",
             service = "agent-memory",
-            version = "0.2.0",
+            version = "0.3.0",
             database = "connected"
         });
     }
@@ -91,7 +93,7 @@ app.MapGet("/health", async (AppDbContext db) =>
         {
             status = "degraded",
             service = "agent-memory",
-            version = "0.2.0",
+            version = "0.3.0",
             database = "unreachable"
         });
     }
@@ -100,5 +102,7 @@ app.MapGet("/health", async (AppDbContext db) =>
 
 app.MapCaptureEndpoints();
 app.MapAdminEndpoints();
+app.MapSearchEndpoints();
+app.MapMcpToolEndpoints();
 
 app.Run();
