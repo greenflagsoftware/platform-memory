@@ -42,7 +42,7 @@ try {
     $contextBody = @{
         query          = $prompt
         limit          = 5
-        min_similarity = 0.6
+        min_similarity = 0.75
     } | ConvertTo-Json
 
     $response = Invoke-WebRequest -Uri "$serverUrl/search/context" -Method Post `

@@ -66,7 +66,7 @@ public static class SearchEndpoints
             var results = await retrieval.SearchAsync(
                 request.Query,
                 limit: request.Limit ?? 5,
-                minSimilarity: request.MinSimilarity ?? 0.6,
+                minSimilarity: request.MinSimilarity ?? 0.75,
                 ct: CancellationToken.None);
 
             if (results.Count == 0)

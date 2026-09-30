@@ -200,6 +200,55 @@ public static class AdminEndpoints
             });
         })
         .WithName("AdminApplyMigrations");
+
+        // ── Phase 6b: GET /admin/stats ────────────────────────────
+        // Returns store statistics: counts by category, score histogram,
+        // dedupe counts, and capture processing summary.
+        group.MapGet("/stats", async (
+            AppDbContext db,
+            CancellationToken ct) =>
+        {
+            var totalMemories = await db.Memories.CountAsync(ct);
+            var totalCaptures = await db.Captures.CountAsync(ct);
+
+            // Memories by category
+            var byCategory = await db.Memories
+                .GroupBy(m => m.Category)
+                .Select(g => new { category = g.Key, count = g.Count() })
+                .ToListAsync(ct);
+
+            // Score histogram: buckets [0,1), [1,2), [2,3), [3,4], and unknown
+            var scoreBuckets = await db.Memories
+                .GroupBy(m => m.Score < 1 ? "0-0.9" :
+                              m.Score < 2 ? "1-1.9" :
+                              m.Score < 3 ? "2-2.9" :
+                              "3-4")
+                .Select(g => new { bucket = g.Key, count = g.Count() })
+                .ToListAsync(ct);
+
+            // Dedup stats
+            var dedupCount = await db.Memories.CountAsync(m => m.SeenCount > 1, ct);
+            var totalSeenCount = await db.Memories.SumAsync(m => m.SeenCount, ct);
+
+            // Captures that didn't result in a memory
+            var capturesWithoutMemory = await db.Captures
+                .CountAsync(c => !db.Memories.Any(m => m.CaptureId == c.Id), ct);
+
+            return Results.Ok(new
+            {
+                total_captures = totalCaptures,
+                total_memories = totalMemories,
+                memories_by_category = byCategory,
+                score_histogram = scoreBuckets,
+                dedup = new
+                {
+                    consolidated_count = dedupCount,
+                    total_seen_count = totalSeenCount
+                },
+                captures_without_memory = capturesWithoutMemory
+            });
+        })
+        .WithName("AdminStats");
     }
 }
 

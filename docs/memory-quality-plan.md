@@ -1,6 +1,6 @@
 # Memory Quality Plan
 
-Status: **implementation started** (Phase 1-3, Phase 5a shipped 2026-09-30).
+Status: **implementation started** (Phases 1-6 shipped 2026-09-30, Phases 5b reprocess only milestone is `reprocess` endpoint).
 Companion to [dev plan.md](dev%20plan.md); if phases here ship, fold a
 summary into that document's phase list and keep this one as the detail record.
 
