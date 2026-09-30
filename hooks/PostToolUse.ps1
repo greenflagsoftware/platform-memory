@@ -5,6 +5,8 @@
 # Implements Phase 1 of the Memory Quality Plan:
 #   1a. Tool-call allowlist — only captures state-changing / decision-bearing tools
 #   1b. Result stringification — ConvertTo-Json with truncation to 500 chars
+# Phase 4: attaches the last few conversation messages as metadata.context so the
+# distiller can tell WHY a command ran (e.g. the user just said "yes, commit and push").
 #
 # Claude Code invokes this hook with the event payload as JSON on STDIN, not
 # as a command-line argument. The payload includes session_id, tool_name,
@@ -165,6 +167,18 @@ if ($toolResult) {
 $rawContent = "${toolName}: ${toolInputJson}"
 if ($toolResultJson) { $rawContent = "$rawContent -> $toolResultJson" }
 
+# ── Conversation context for the distiller (Phase 4) ──────────
+# Loaded defensively: if the helper is missing or broken the hook still captures.
+$contextText = $null
+try {
+    . (Join-Path $PSScriptRoot 'lib\TranscriptContext.ps1')
+    $transcriptPath = $null
+    if ($payload -and ($payload.PSObject.Properties.Name -contains "transcript_path")) {
+        $transcriptPath = $payload.transcript_path
+    }
+    $contextText = Get-TranscriptContext -TranscriptPath $transcriptPath -ExcludeText $null
+} catch {}
+
 $body = @{
     session_id  = $sessionId
     hook_event  = "PostToolUse"
@@ -172,6 +186,7 @@ $body = @{
     metadata    = @{
         timestamp = (Get-Date -Format "o")
         tool_name = $toolName
+        context   = $contextText
     } | ConvertTo-Json
 } | ConvertTo-Json
 

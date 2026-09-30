@@ -22,6 +22,20 @@ public class MemoryRepository : IMemoryRepository
         return await _db.Memories.FindAsync([id], ct);
     }
 
+    public async Task<IReadOnlyList<MemoryRecord>> GetByCaptureIdAsync(long captureId, CancellationToken ct = default)
+    {
+        return await _db.Memories
+            .Where(m => m.CaptureId == captureId)
+            .OrderByDescending(m => m.CreatedAt)
+            .ToListAsync(ct);
+    }
+
+    public async Task DeleteMemoriesAsync(IEnumerable<MemoryRecord> memories, CancellationToken ct = default)
+    {
+        _db.Memories.RemoveRange(memories);
+        await _db.SaveChangesAsync(ct);
+    }
+
     public async Task AddMemoryAsync(MemoryRecord memory, CancellationToken ct = default)
     {
         _db.Memories.Add(memory);
@@ -53,8 +67,37 @@ public class MemoryRepository : IMemoryRepository
         // so we execute the HNSW-index-friendly query directly.
         var conn = _db.Database.GetDbConnection();
 
-        await conn.OpenAsync(ct);
+        // The DbContext's connection is shared by everything in this scope. Only open (and
+        // later close) it if we are the ones who found it closed: opening an already-open
+        // connection throws, and leaving it open made every second search in one scope
+        // (e.g. a batch reprocess) fail with "Connection already open".
+        var openedHere = conn.State != System.Data.ConnectionState.Open;
+        if (openedHere)
+        {
+            await conn.OpenAsync(ct);
+        }
 
+        try
+        {
+            return await ExecuteSearchAsync(conn, queryEmbedding, limit, minSimilarity, category, ct);
+        }
+        finally
+        {
+            if (openedHere)
+            {
+                await conn.CloseAsync();
+            }
+        }
+    }
+
+    private static async Task<IReadOnlyList<MemorySearchResult>> ExecuteSearchAsync(
+        DbConnection conn,
+        Vector queryEmbedding,
+        int limit,
+        double minSimilarity,
+        string? category,
+        CancellationToken ct)
+    {
         await using var cmd = conn.CreateCommand();
 
         var sql = """

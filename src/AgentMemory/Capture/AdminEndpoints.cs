@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using AgentMemory.Processing;
 using AgentMemory.Storage;
 using Microsoft.EntityFrameworkCore;
@@ -127,26 +128,28 @@ public static class AdminEndpoints
         group.MapPost("/memories/reprocess", async (
             ReprocessRequest request,
             AppDbContext db,
+            IMemoryRepository memoryRepo,
             CaptureProcessor processor,
             CancellationToken ct) =>
         {
-            // Step 1: Determine which captures to reprocess
+            var dryRun = request.DryRun ?? true;
+
+            List<CaptureRecord> captures;
             if (request.CaptureIds is { Length: > 0 })
             {
-                // Reprocess specific captures
                 var captureIds = new HashSet<long>(request.CaptureIds);
-                var captures = await db.Captures
+                captures = await db.Captures
                     .Where(c => captureIds.Contains(c.Id))
                     .OrderBy(c => c.Id)
                     .ToListAsync(ct);
-                return await ReprocessHelper.RunReprocess(captures, request.DryRun ?? true, db, processor, ct);
+            }
+            else
+            {
+                captures = await db.Captures.OrderBy(c => c.Id).ToListAsync(ct);
             }
 
-            // Reprocess ALL captures
-            var allCaptures = await db.Captures
-                .OrderBy(c => c.Id)
-                .ToListAsync(ct);
-            return await ReprocessHelper.RunReprocess(allCaptures, request.DryRun ?? true, db, processor, ct);
+            var summary = await ReprocessHelper.RunReprocessAsync(captures, dryRun, memoryRepo, processor, ct);
+            return Results.Ok(summary);
         })
         .WithName("AdminReprocessMemories");
 
@@ -253,120 +256,190 @@ public static class AdminEndpoints
 }
 
 // ── Phase 5a: Prune request type ─────────────────────────────────
+// Request bodies are snake_case like the rest of the API (CaptureRequest, the responses).
+// Without the attributes, minimal APIs bind camelCase only and silently ignore "dry_run".
 public record PruneRequest(
-    string? Category = null,
-    double? MaxScore = null,
-    long[]? Ids = null,
-    bool? DryRun = true
+    [property: JsonPropertyName("category")] string? Category = null,
+    [property: JsonPropertyName("max_score")] double? MaxScore = null,
+    [property: JsonPropertyName("ids")] long[]? Ids = null,
+    [property: JsonPropertyName("dry_run")] bool? DryRun = true
 );
 
 // ── Phase 5b: Reprocess request type ─────────────────────────────
 public record ReprocessRequest(
-    long[]? CaptureIds = null,
-    bool? DryRun = true
+    [property: JsonPropertyName("capture_ids")] long[]? CaptureIds = null,
+    [property: JsonPropertyName("dry_run")] bool? DryRun = true
 );
 
 // ── Phase 5b: Reprocess logic ────────────────────────────────────
+public record ReprocessMemorySnapshot(string Content, string Category, double Score);
+
+public record ReprocessItem(
+    [property: JsonPropertyName("capture_id")] long CaptureId,
+    [property: JsonPropertyName("action")] string Action,
+    [property: JsonPropertyName("reason")] string? Reason,
+    [property: JsonPropertyName("old")] ReprocessMemorySnapshot? Old,
+    [property: JsonPropertyName("new")] ReprocessMemorySnapshot? New,
+    // Only set on a real run: "stored" or "deduplicated" (dry runs don't preview dedup).
+    [property: JsonPropertyName("outcome")] string? Outcome);
+
+public record ReprocessSummary(
+    [property: JsonPropertyName("status")] string Status,
+    [property: JsonPropertyName("dry_run")] bool DryRun,
+    [property: JsonPropertyName("total_captures")] int TotalCaptures,
+    [property: JsonPropertyName("total_changes")] int TotalChanges,
+    [property: JsonPropertyName("total_errors")] int TotalErrors,
+    [property: JsonPropertyName("results")] IReadOnlyList<ReprocessItem> Results);
+
 /// <summary>
 /// Run the full processing pipeline for a batch of captures, replacing existing
 /// memories with freshly processed results. Dry-run by default.
+///
+/// Safety rules, because this deletes data:
+/// - A memory is only deleted when the pipeline DECIDES the capture isn't worth keeping
+///   (gate, threshold, distiller NONE). A pipeline FAILURE (OpenRouter timeout, 429, no
+///   embedding) leaves the existing memory alone and is reported as an "error" item.
+/// - If storing the replacement fails after the old memory was deleted, the old memory is
+///   put back. One bad capture is reported and skipped, not allowed to abort the batch.
 /// </summary>
-internal static class ReprocessHelper
+public static class ReprocessHelper
 {
-    internal static async Task<IResult> RunReprocess(
-        List<CaptureRecord> captures,
+    public static async Task<ReprocessSummary> RunReprocessAsync(
+        IReadOnlyList<CaptureRecord> captures,
         bool dryRun,
-        AppDbContext db,
+        IMemoryRepository memoryRepo,
         CaptureProcessor processor,
         CancellationToken ct)
     {
-        var results = new List<object>();
-        var totalChanges = 0;
+        var results = new List<ReprocessItem>();
 
         foreach (var capture in captures)
         {
-            // Get the current memory (if any) for this capture
-            var existingMemory = await db.Memories
-                .Where(m => m.CaptureId == capture.Id)
-                .OrderByDescending(m => m.CreatedAt)
-                .FirstOrDefaultAsync(ct);
+            ct.ThrowIfCancellationRequested();
 
-            // Store the old state for dry-run comparison
-            var oldContent = existingMemory?.Content;
-            var oldCategory = existingMemory?.Category;
-            var oldScore = existingMemory?.Score;
-
-            // Process the capture through the full pipeline (in-memory, not persisted yet)
-            var newMemory = await processor.ProcessCaptureDryAsync(capture, ct);
-
-            if (newMemory == null)
+            var existing = new List<MemoryRecord>();
+            try
             {
-                // Capture didn't pass the pipeline — track whether we'd delete the old memory
-                if (existingMemory != null)
+                existing = (await memoryRepo.GetByCaptureIdAsync(capture.Id, ct)).ToList();
+                var latest = existing.Count > 0 ? existing[0] : null;
+                var old = latest == null
+                    ? null
+                    : new ReprocessMemorySnapshot(latest.Content, latest.Category, latest.Score);
+
+                var evaluated = await processor.EvaluateCaptureAsync(capture, ct);
+
+                if (evaluated.IsFailure)
                 {
-                    results.Add(new
-                    {
-                        capture_id = capture.Id,
-                        action = "delete_old_memory",
-                        reason = "no longer passes pipeline (gate/classify/distill)",
-                        old = new { content = oldContent, category = oldCategory, score = oldScore },
-                        _new = (object?)null
-                    });
-                    totalChanges++;
+                    // Not a decision: keep whatever is stored and say so.
+                    results.Add(new ReprocessItem(
+                        capture.Id, "error", evaluated.FailureReason, old, null,
+                        existing.Count > 0 ? "kept_old" : null));
+                    continue;
                 }
-                // else: wasn't stored before and still isn't — no change
-                continue;
-            }
 
-            // Compare with existing
-            var changed = existingMemory == null
-                || newMemory.Category != oldCategory
-                || Math.Abs(newMemory.Score - (oldScore ?? 0)) > 0.01
-                || newMemory.Content != oldContent;
-
-            if (changed)
-            {
-                results.Add(new
+                var newMemory = evaluated.Memory;
+                if (newMemory == null)
                 {
-                    capture_id = capture.Id,
-                    action = existingMemory == null ? "create" : "update",
-                    old = existingMemory == null
-                        ? null
-                        : (object)new { content = oldContent, category = oldCategory, score = oldScore },
-                    _new = new
+                    // The pipeline decided this is not worth remembering: any stored memory is stale.
+                    if (existing.Count > 0)
                     {
-                        content = newMemory.Content,
-                        category = newMemory.Category,
-                        score = newMemory.Score,
-                        source_excerpt = newMemory.SourceExcerpt
+                        if (!dryRun)
+                        {
+                            await memoryRepo.DeleteMemoriesAsync(existing, ct);
+                        }
+
+                        results.Add(new ReprocessItem(
+                            capture.Id, "delete_old_memory", evaluated.SkipReason,
+                            old, null, dryRun ? null : "deleted"));
                     }
-                });
-                totalChanges++;
-            }
-
-            if (!dryRun && changed)
-            {
-                // Apply changes: delete old memory, keep captures_old content
-                if (existingMemory != null)
-                {
-                    db.Memories.Remove(existingMemory);
+                    continue;
                 }
 
-                // Insert the new memory
-                db.Memories.Add(newMemory);
-                await db.SaveChangesAsync(ct);
+                var changed = latest == null
+                    || newMemory.Category != latest.Category
+                    || Math.Abs(newMemory.Score - latest.Score) > 0.01
+                    || newMemory.Content != latest.Content;
+                if (!changed)
+                {
+                    continue;
+                }
+
+                string? outcome = null;
+                if (!dryRun)
+                {
+                    outcome = await ReplaceAsync(existing, newMemory, memoryRepo, processor, ct);
+                }
+
+                results.Add(new ReprocessItem(
+                    capture.Id, latest == null ? "create" : "update", null,
+                    old,
+                    new ReprocessMemorySnapshot(newMemory.Content, newMemory.Category, newMemory.Score),
+                    outcome));
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                results.Add(new ReprocessItem(
+                    capture.Id, "error", $"{ex.GetType().Name}: {ex.Message}",
+                    null, null, existing.Count > 0 ? "kept_or_restored_old" : null));
             }
         }
 
-        var status = dryRun ? "dry_run" : "reprocessed";
+        var errors = results.Count(r => r.Action == "error");
+        return new ReprocessSummary(
+            dryRun ? "dry_run" : errors > 0 ? "reprocessed_with_errors" : "reprocessed",
+            dryRun,
+            captures.Count,
+            results.Count - errors,
+            errors,
+            results);
+    }
 
-        return Results.Ok(new
+    /// <summary>
+    /// Delete the old rows and store the replacement (with dedup). If storing throws, put the
+    /// old rows back before rethrowing so a failure never costs a memory.
+    /// </summary>
+    private static async Task<string> ReplaceAsync(
+        List<MemoryRecord> existing,
+        MemoryRecord newMemory,
+        IMemoryRepository memoryRepo,
+        CaptureProcessor processor,
+        CancellationToken ct)
+    {
+        // Remove the old rows first so the new memory can't dedup against itself.
+        if (existing.Count > 0)
         {
-            status,
-            dry_run = dryRun,
-            total_captures = captures.Count,
-            total_changes = totalChanges,
-            results
-        });
+            await memoryRepo.DeleteMemoriesAsync(existing, ct);
+        }
+
+        try
+        {
+            return (await processor.StoreWithDedupAsync(newMemory, ct)) == StoreOutcome.Deduplicated
+                ? "deduplicated"
+                : "stored";
+        }
+        catch
+        {
+            foreach (var old in existing)
+            {
+                // Re-insert as a fresh row (new id) with the same content and history.
+                await memoryRepo.AddMemoryAsync(new MemoryRecord
+                {
+                    CaptureId = old.CaptureId,
+                    Category = old.Category,
+                    Score = old.Score,
+                    Content = old.Content,
+                    Embedding = old.Embedding,
+                    SourceExcerpt = old.SourceExcerpt,
+                    CreatedAt = old.CreatedAt,
+                    LastSeenAt = old.LastSeenAt,
+                    SeenCount = old.SeenCount,
+                }, CancellationToken.None);
+            }
+            throw;
+        }
     }
 }

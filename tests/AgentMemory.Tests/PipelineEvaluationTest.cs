@@ -20,12 +20,13 @@ namespace AgentMemory.Tests;
 /// </summary>
 public class PipelineEvaluationTest
 {
+    // Rejection patterns are left unset so the processor's built-in defaults are exercised
+    // (a comma-joined string does not bind to string[]; arrays need indexed keys).
     private static readonly IConfiguration Config = new ConfigurationBuilder()
         .AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["Memory:SaveThreshold"] = "2.5",
             ["Memory:Gate:MinWords"] = "3",
-            ["Memory:Gate:RejectionPatterns"] = "yes, commit and push,yes,ok,go ahead,commit and push,done,proceed,continue",
             ["Memory:DedupSimilarity"] = "1.1"
         })!
         .Build();

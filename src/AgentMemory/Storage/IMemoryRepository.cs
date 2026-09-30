@@ -7,6 +7,16 @@ public interface IMemoryRepository
     /// </summary>
     Task<MemoryRecord?> GetByIdAsync(long id, CancellationToken ct = default);
 
+    /// <summary>
+    /// All memories derived from a capture, newest first.
+    /// </summary>
+    Task<IReadOnlyList<MemoryRecord>> GetByCaptureIdAsync(long captureId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Permanently remove the given memories.
+    /// </summary>
+    Task DeleteMemoriesAsync(IEnumerable<MemoryRecord> memories, CancellationToken ct = default);
+
     Task AddMemoryAsync(MemoryRecord memory, CancellationToken ct = default);
 
     /// <summary>

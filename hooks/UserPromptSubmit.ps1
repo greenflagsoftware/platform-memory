@@ -71,6 +71,18 @@ if ($context) {
     Write-Output $output
 }
 
+# ── Conversation context for the distiller (Phase 4) ──────────
+# Loaded defensively: if the helper is missing or broken the hook still captures.
+$contextText = $null
+try {
+    . (Join-Path $PSScriptRoot 'lib\TranscriptContext.ps1')
+    $transcriptPath = $null
+    if ($payload -and ($payload.PSObject.Properties.Name -contains "transcript_path")) {
+        $transcriptPath = $payload.transcript_path
+    }
+    $contextText = Get-TranscriptContext -TranscriptPath $transcriptPath -ExcludeText $prompt
+} catch {}
+
 # ── Step 3: Fire-and-forget capture (use the ORIGINAL prompt) ───
 $body = @{
     session_id  = $sessionId
@@ -80,6 +92,8 @@ $body = @{
         timestamp      = (Get-Date -Format "o")
         context_used   = ($context -ne $null)
         context_length = if ($context) { $context.Length } else { 0 }
+        # Previous conversation turns for the distiller (not the injected memories above).
+        context        = $contextText
     } | ConvertTo-Json
 } | ConvertTo-Json
 

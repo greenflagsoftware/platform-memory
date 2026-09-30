@@ -12,7 +12,8 @@ namespace AgentMemory.Processing;
 /// Runs as an in-process fire-and-forget Task per capture.
 ///
 /// Quality plan phases implemented here:
-/// - Phase 1d: Minimum-content gate (server-side, before the LLM call)
+/// - Phase 1d: Minimum-content gate (server-side, before the LLM call); acknowledgements
+///   are rejected only on a whole-message match, not a substring match
 /// - Phase 2a: Corrected threshold scale (default 2.5 on 0-4 scale)
 /// - Phase 2d: Fixed error path (classification error no longer pretends to store)
 /// - Phase 3: Deduplicate on write (search before insert, merge on hit)
@@ -34,19 +35,27 @@ public class CaptureProcessor
     private const double DefaultDedupSimilarity = 0.92;
 
     /// <summary>
-    /// Patterns for low-value content that should be rejected before the LLM call.
-    /// Matched case-insensitively against the capture's raw content.
+    /// Bare acknowledgements / confirmations that carry no durable fact. A capture is
+    /// rejected only when its ENTIRE text (ignoring case, punctuation and extra whitespace)
+    /// equals one of these — never on a substring match, so "hooks", "token" or
+    /// "abandoned" are not mistaken for "ok" or "done".
     /// </summary>
     private static readonly string[] DefaultRejectionPatterns =
     [
-        "yes, commit and push",
-        "yes\b",
-        "ok\b",
+        "yes",
+        "yes commit and push",
+        "yes please",
+        "ok",
+        "okay",
         "go ahead",
         "commit and push",
-        "done\b",
+        "done",
         "proceed",
         "continue",
+        "thanks",
+        "thank you",
+        "sounds good",
+        "lgtm",
     ];
 
     private readonly ICaptureRepository _captureRepo;
@@ -94,52 +103,7 @@ public class CaptureProcessor
             if (memory == null)
                 return;
 
-            // ── Phase 3: Deduplicate on write ───────────────────────
-            // (only applies to real persistence — dup check against existing store)
-            // For reprocess, we want a fresh memory, so skip dedup in the dry pipeline
-            // and handle it separately below.
-
-            // Check for duplicates against existing memories
-            var dedupSimilarity = _configuration.GetValue<double>(DedupSimilarityConfigKey, DefaultDedupSimilarity);
-            var existingResults = await _memoryRepo.SearchMemoriesAsync(
-                memory.Embedding,
-                limit: 1,
-                minSimilarity: dedupSimilarity,
-                ct: ct);
-
-            if (existingResults.Count > 0)
-            {
-                var existing = existingResults[0];
-                var existingMemory = await _memoryRepo.GetByIdAsync(existing.Id, ct);
-                if (existingMemory != null)
-                {
-                    existingMemory.LastSeenAt = DateTimeOffset.UtcNow;
-                    existingMemory.SeenCount = existingMemory.SeenCount + 1;
-                    if (memory.Score > existingMemory.Score)
-                    {
-                        existingMemory.Score = memory.Score;
-                    }
-                    await _memoryRepo.UpdateMemoryAsync(existingMemory, ct);
-
-                    _logger.LogInformation(
-                        "Deduplicated capture {CaptureId}: merged into existing memory id={ExistingId} " +
-                        "(seen_count={SeenCount}, score={Score:F2})",
-                        captureId, existingMemory.Id, existingMemory.SeenCount, existingMemory.Score);
-                    return;
-                }
-                _logger.LogWarning(
-                    "Dedup hit for capture {CaptureId}: found memory id={ExistingId} but could not load it; " +
-                    "inserting new memory",
-                    captureId, existing.Id);
-            }
-
-            // Step 4: Store memory via repository
-            await _memoryRepo.AddMemoryAsync(memory, ct);
-
-            _logger.LogInformation(
-                "Stored memory id={MemoryId} for capture {CaptureId}: category={Category}, " +
-                "score={Score:F2}, content_len={ContentLen}",
-                memory.Id, captureId, memory.Category, memory.Score, memory.Content.Length);
+            await StoreWithDedupAsync(memory, ct);
         }
         catch (OperationCanceledException)
         {
@@ -152,12 +116,74 @@ public class CaptureProcessor
     }
 
     /// <summary>
+    /// Phase 3: persist a processed memory, first merging it into an existing memory whose
+    /// embedding is within <c>Memory:DedupSimilarity</c> (bumps seen_count / last_seen_at and
+    /// keeps the higher score) instead of inserting a near-duplicate row.
+    /// Shared by the live capture path and the reprocess admin endpoint.
+    /// </summary>
+    public async Task<StoreOutcome> StoreWithDedupAsync(MemoryRecord memory, CancellationToken ct = default)
+    {
+        var dedupSimilarity = _configuration.GetValue<double>(DedupSimilarityConfigKey, DefaultDedupSimilarity);
+        var existingResults = await _memoryRepo.SearchMemoriesAsync(
+            memory.Embedding,
+            limit: 1,
+            minSimilarity: dedupSimilarity,
+            ct: ct);
+
+        if (existingResults.Count > 0)
+        {
+            var existing = existingResults[0];
+            var existingMemory = await _memoryRepo.GetByIdAsync(existing.Id, ct);
+            if (existingMemory != null)
+            {
+                existingMemory.LastSeenAt = DateTimeOffset.UtcNow;
+                existingMemory.SeenCount += 1;
+                if (memory.Score > existingMemory.Score)
+                {
+                    existingMemory.Score = memory.Score;
+                }
+                await _memoryRepo.UpdateMemoryAsync(existingMemory, ct);
+
+                _logger.LogInformation(
+                    "Deduplicated capture {CaptureId}: merged into existing memory id={ExistingId} " +
+                    "(seen_count={SeenCount}, score={Score:F2})",
+                    memory.CaptureId, existingMemory.Id, existingMemory.SeenCount, existingMemory.Score);
+                return StoreOutcome.Deduplicated;
+            }
+            _logger.LogWarning(
+                "Dedup hit for capture {CaptureId}: found memory id={ExistingId} but could not load it; " +
+                "inserting new memory",
+                memory.CaptureId, existing.Id);
+        }
+
+        await _memoryRepo.AddMemoryAsync(memory, ct);
+
+        _logger.LogInformation(
+            "Stored memory id={MemoryId} for capture {CaptureId}: category={Category}, " +
+            "score={Score:F2}, content_len={ContentLen}",
+            memory.Id, memory.CaptureId, memory.Category, memory.Score, memory.Content.Length);
+        return StoreOutcome.Stored;
+    }
+
+    /// <summary>
     /// Run the full processing pipeline for a capture without persisting.
-    /// Returns a MemoryRecord ready for storage, or null if the capture was
-    /// skipped (gate/classify/distill/embedding failure).
-    /// Used by both ProcessCaptureAsync and the reprocess admin endpoint.
+    /// Returns a MemoryRecord ready for storage, or null if nothing should be stored
+    /// (skipped by a decision OR failed — use <see cref="EvaluateCaptureAsync"/> when the
+    /// difference matters, as it does for anything destructive).
     /// </summary>
     public async Task<MemoryRecord?> ProcessCaptureDryAsync(
+        CaptureRecord capture,
+        CancellationToken ct = default)
+        => (await EvaluateCaptureAsync(capture, ct)).Memory;
+
+    /// <summary>
+    /// Run the full pipeline (gate → classify → threshold → distill → embed) without
+    /// persisting, and say WHY nothing would be stored: a deliberate decision
+    /// (<see cref="ProcessResult.Skipped"/>) versus a transient failure such as an OpenRouter
+    /// timeout or rate limit (<see cref="ProcessResult.Failed"/>). Reprocess must not treat
+    /// the latter as "no longer worth remembering" and delete the existing memory.
+    /// </summary>
+    public async Task<ProcessResult> EvaluateCaptureAsync(
         CaptureRecord capture,
         CancellationToken ct = default)
     {
@@ -168,7 +194,7 @@ public class CaptureProcessor
             _logger.LogInformation(
                 "Capture {CaptureId} rejected by gate: {SkipReason}",
                 capture.Id, skipReason);
-            return null;
+            return ProcessResult.Skipped($"gate: {skipReason}");
         }
 
         // Step 1: Classify
@@ -178,7 +204,7 @@ public class CaptureProcessor
             _logger.LogWarning(
                 "Classification returned error for capture {CaptureId}: {Error}; skipping",
                 capture.Id, classification.Error);
-            return null;
+            return ProcessResult.Failed($"classification error: {classification.Error}");
         }
 
         // Step 2: Threshold check
@@ -188,7 +214,8 @@ public class CaptureProcessor
             _logger.LogInformation(
                 "Capture {CaptureId} score {Score:F2} below threshold {Threshold:F2}; skipping memory",
                 capture.Id, classification.SaveWorthiness, threshold);
-            return null;
+            return ProcessResult.Skipped(
+                $"score {classification.SaveWorthiness:F2} below threshold {threshold:F2}");
         }
 
         // ── Phase 4: Distill the capture into a standalone fact ──
@@ -200,13 +227,21 @@ public class CaptureProcessor
             _logger.LogWarning(
                 "Distillation returned error for capture {CaptureId}: {Error}; skipping memory",
                 capture.Id, distillation.Error);
-            return null;
+            return ProcessResult.Failed($"distillation error: {distillation.Error}");
         }
 
-        var contentToStore = distillation.DistilledContent ?? capture.RawContent;
-        var sourceExcerpt = distillation.DistilledContent != null
-            ? capture.RawContent
-            : null;
+        // NONE: the distiller found no durable fact. Do not fall back to the raw capture —
+        // that would store exactly the noise (tool logs, fragments) the distiller rejected.
+        if (distillation.DistilledContent == null)
+        {
+            _logger.LogInformation(
+                "Capture {CaptureId} distilled to NONE (no durable fact); skipping memory",
+                capture.Id);
+            return ProcessResult.Skipped("distiller returned NONE (no durable fact)");
+        }
+
+        var contentToStore = distillation.DistilledContent;
+        var sourceExcerpt = capture.RawContent;
 
         // Step 3: Generate embedding from the distilled (or raw) content
         var embedding = await _embedding.GenerateEmbeddingAsync(contentToStore, ct);
@@ -215,10 +250,10 @@ public class CaptureProcessor
             _logger.LogWarning(
                 "Embedding generation returned null for capture {CaptureId}; skipping memory",
                 capture.Id);
-            return null;
+            return ProcessResult.Failed("embedding generation failed");
         }
 
-        return new MemoryRecord
+        return ProcessResult.Ok(new MemoryRecord
         {
             CaptureId = capture.Id,
             Category = classification.Category,
@@ -226,7 +261,7 @@ public class CaptureProcessor
             Content = contentToStore,
             SourceExcerpt = sourceExcerpt,
             Embedding = new Vector(embedding),
-        };
+        });
     }
 
     /// <summary>
@@ -241,14 +276,14 @@ public class CaptureProcessor
             return "empty_content";
         }
 
-        // Pattern rejection (case-insensitive)
+        // Whole-message acknowledgement rejection (case/punctuation-insensitive).
         var rejectionPatterns = _configuration.GetSection(RejectionPatternsConfigKey)
             .Get<string[]>() ?? DefaultRejectionPatterns;
 
-        var contentLower = rawContent.ToLowerInvariant();
+        var normalized = NormalizeForMatch(rawContent);
         foreach (var pattern in rejectionPatterns)
         {
-            if (contentLower.Contains(pattern.ToLowerInvariant()))
+            if (normalized == NormalizeForMatch(pattern))
             {
                 return $"matched_rejection_pattern: '{pattern}'";
             }
@@ -278,6 +313,18 @@ public class CaptureProcessor
         }
 
         return null; // accepted
+    }
+
+    /// <summary>
+    /// Lower-cases, replaces punctuation with spaces and collapses whitespace, so
+    /// "Yes, commit and push." and "yes commit  and push" compare equal.
+    /// </summary>
+    private static string NormalizeForMatch(string text)
+    {
+        var chars = text.ToLowerInvariant()
+            .Select(c => char.IsLetterOrDigit(c) ? c : ' ')
+            .ToArray();
+        return string.Join(' ', new string(chars).Split(' ', StringSplitOptions.RemoveEmptyEntries));
     }
 
     /// <summary>
@@ -314,4 +361,24 @@ public class CaptureProcessor
 
         return null;
     }
+}
+
+/// <summary>Result of <see cref="CaptureProcessor.StoreWithDedupAsync"/>.</summary>
+public enum StoreOutcome
+{
+    Stored,
+    Deduplicated,
+}
+
+/// <summary>
+/// Outcome of <see cref="CaptureProcessor.EvaluateCaptureAsync"/>: exactly one of a memory to
+/// store, a deliberate skip, or a failure.
+/// </summary>
+public sealed record ProcessResult(MemoryRecord? Memory, string? SkipReason, string? FailureReason)
+{
+    public bool IsFailure => FailureReason != null;
+
+    public static ProcessResult Ok(MemoryRecord memory) => new(memory, null, null);
+    public static ProcessResult Skipped(string reason) => new(null, reason, null);
+    public static ProcessResult Failed(string reason) => new(null, null, reason);
 }

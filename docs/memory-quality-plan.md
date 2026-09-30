@@ -1,6 +1,8 @@
 # Memory Quality Plan
 
-Status: **fully implemented** (all phases shipped 2026-09-30).
+Status: phases 0-6 are implemented (2026-09-30). Not yet done: the Phase 5 one-off cleanup
+(`prune` then `reprocess` on the live store) has not been run, and a full reprocess still makes
+its LLM calls inside a single HTTP request.
 
 Companion to [dev plan.md](dev%20plan.md); summary folded below.
 Companion to [dev plan.md](dev%20plan.md); if phases here ship, fold a
@@ -126,9 +128,19 @@ Ordered cheapest and highest-leverage first. Each phase is independently shippab
 - Add a distillation step between the threshold check and embedding: a second (or merged)
   OpenRouter call rewrites the capture into one self-contained statement ("Decision: commit
   and push the hook fixes to origin/main"), given the surrounding context.
-- **Context source.** Hooks already receive `transcript_path` on stdin. `UserPromptSubmit.ps1`
-  and `Stop.ps1` include the previous 1-2 turns (bounded, ~1-2k chars) in `metadata`; the
-  server passes them to the distiller but does not store or embed them.
+- **Context source (implemented).** Hooks receive `transcript_path` on stdin.
+  `hooks/lib/TranscriptContext.ps1` (`Get-TranscriptContext`, PowerShell 5.1-safe) reads the
+  tail of the transcript JSONL and returns the last ~4 dialogue messages as bounded text
+  (<= 2000 chars; user messages keep their head, assistant messages keep their tail because
+  that is where the question being answered sits). It skips tool calls/results, thinking,
+  sidechain and meta entries, strips `<system-reminder>` and `<relevant_memories>` blocks (so
+  retrieved memories are never fed back into new ones), and removes the event being captured
+  if the transcript already contains it. `UserPromptSubmit.ps1`, `Stop.ps1` and
+  `PostToolUse.ps1` put the result in `metadata.context`; `CaptureProcessor.ExtractContext`
+  hands it to the distiller. The context is never embedded or stored on the memory; it lives
+  only in the capture's `metadata` JSON. Any failure yields no context and the capture
+  proceeds. Tests: `hooks/tests/TranscriptContext.Tests.ps1` (run under `powershell` and
+  `pwsh`) and the context-forwarding tests in `CaptureProcessorTests`.
 - **What is stored.** `memories.content` becomes the distilled fact and is what gets
   embedded. `captures.raw_content` keeps the original. Add `memories.source_excerpt`
   (nullable) if traceability is wanted.

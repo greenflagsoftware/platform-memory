@@ -28,11 +28,26 @@ if ($payload -and ($payload.PSObject.Properties.Name -contains "last_assistant_m
 }
 if (-not $rawContent) { $rawContent = "Session ended" }
 
+# ── Conversation context for the distiller (Phase 4) ──────────
+# Loaded defensively: if the helper is missing or broken the hook still captures.
+$contextText = $null
+try {
+    . (Join-Path $PSScriptRoot 'lib\TranscriptContext.ps1')
+    $transcriptPath = $null
+    if ($payload -and ($payload.PSObject.Properties.Name -contains "transcript_path")) {
+        $transcriptPath = $payload.transcript_path
+    }
+    $contextText = Get-TranscriptContext -TranscriptPath $transcriptPath -ExcludeText $rawContent
+} catch {}
+
 $body = @{
     session_id  = $sessionId
     hook_event  = "Stop"
     raw_content = $rawContent
-    metadata    = @{timestamp = (Get-Date -Format "o")} | ConvertTo-Json
+    metadata    = @{
+        timestamp = (Get-Date -Format "o")
+        context   = $contextText
+    } | ConvertTo-Json
 } | ConvertTo-Json
 
 try {
