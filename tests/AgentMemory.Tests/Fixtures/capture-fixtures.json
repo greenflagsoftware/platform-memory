@@ -1,0 +1,159 @@
+{
+  "description": "Baseline capture fixtures for Phase 0 evaluation. Each entry models a real capture from the first 38 stored memories audit (2026-09-30). Labels: 'keep' = durable fact/decision worth storing, 'drop' = noise.",
+  "captures": [
+    {
+      "id": 1,
+      "hook_event": "PostToolUse",
+      "raw_content": "Bash: git commit -m 'Add pgvector HNSW index to memories table' -> success",
+      "label": "keep",
+      "reason": "State-changing commit with specific detail about the schema change"
+    },
+    {
+      "id": 2,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "We decided to use pgvector with HNSW indexes because cosine distance queries on 1536-d vectors need sub-100ms latency. The m=16 and ef_construction=64 parameters are a good starting point.",
+      "label": "keep",
+      "reason": "Architectural decision with rationale and specific parameter values"
+    },
+    {
+      "id": 3,
+      "hook_event": "PostToolUse",
+      "raw_content": "Write: File written to src/AgentMemory/appsettings.json with Memory:SaveThreshold set to 2.5",
+      "label": "keep",
+      "reason": "Configuration change — future sessions need to know where threshold is set"
+    },
+    {
+      "id": 4,
+      "hook_event": "PostToolUse",
+      "raw_content": "Bash: docker compose up -d -> (started containers: agent-memory, pgvector)",
+      "label": "keep",
+      "reason": "Docker compose start — useful how-to for running the system"
+    },
+    {
+      "id": 5,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "Use the CompareExchange pattern for lock-free reads on the embedding cache; the standard lock is a bottleneck under concurrent search.",
+      "label": "keep",
+      "reason": "Non-obvious gotcha about concurrency pattern"
+    },
+    {
+      "id": 6,
+      "hook_event": "PostToolUse",
+      "raw_content": "Bash: ls -la -> (file listing with 38 entries)",
+      "label": "drop",
+      "reason": "Read-only command output — no durable fact"
+    },
+    {
+      "id": 7,
+      "hook_event": "PostToolUse",
+      "raw_content": "Read: Program.cs -> (file contents) -> @{type=text; file=}",
+      "label": "drop",
+      "reason": "File read — no durable fact"
+    },
+    {
+      "id": 8,
+      "hook_event": "PostToolUse",
+      "raw_content": "Glob: **/*.cs -> 23 files found",
+      "label": "drop",
+      "reason": "File search — no durable fact"
+    },
+    {
+      "id": 9,
+      "hook_event": "PostToolUse",
+      "raw_content": "Grep: MemorySaveThreshold -> src/AgentMemory/appsettings.json:    \"SaveThreshold\": 2.5",
+      "label": "drop",
+      "reason": "Search that found a config value — the value itself was already captured by a write event"
+    },
+    {
+      "id": 10,
+      "hook_event": "PostToolUse",
+      "raw_content": "WebSearch: pgvector HNSW parameters -> (search results)",
+      "label": "drop",
+      "reason": "Web search — ephemeral research, not a decision"
+    },
+    {
+      "id": 11,
+      "hook_event": "PostToolUse",
+      "raw_content": "Bash: git log --oneline -5 -> abc1234 Fix typo, def5678 Add migration",
+      "label": "drop",
+      "reason": "Git log read — no durable fact"
+    },
+    {
+      "id": 12,
+      "hook_event": "PostToolUse",
+      "raw_content": "Fetch: https://api.github.com/repos/.../issues -> (API response)",
+      "label": "drop",
+      "reason": "API fetch — no durable fact"
+    },
+    {
+      "id": 13,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "Yes, commit and push.",
+      "label": "drop",
+      "reason": "Bare acknowledgement — no durable fact"
+    },
+    {
+      "id": 14,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "ok",
+      "label": "drop",
+      "reason": "Single-word acknowledgement — no durable fact"
+    },
+    {
+      "id": 15,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "go ahead",
+      "label": "drop",
+      "reason": "Short confirmation — no durable fact"
+    },
+    {
+      "id": 16,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "done",
+      "label": "drop",
+      "reason": "Session-ended acknowledgement — no durable fact"
+    },
+    {
+      "id": 17,
+      "hook_event": "Stop",
+      "raw_content": "Session ended",
+      "label": "drop",
+      "reason": "Session summary stub — no durable fact"
+    },
+    {
+      "id": 18,
+      "hook_event": "PostToolUse",
+      "raw_content": "mcp__agent-memory__search_memories: {\"query\": \"pgvector HNSW\"} -> (memory results)",
+      "label": "drop",
+      "reason": "AgentMemory's own MCP tool call — feedback loop prevention"
+    },
+    {
+      "id": 19,
+      "hook_event": "UserPromptSubmit",
+      "raw_content": "What was the decision about the embedding dimension?",
+      "label": "keep",
+      "reason": "Question about a past decision — reveals a topic worth knowing (though content is the question, not the answer)"
+    },
+    {
+      "id": 20,
+      "hook_event": "PostToolUse",
+      "raw_content": "Bash: dotnet add package Pgvector.EntityFrameworkCore -> added package v0.3.0",
+      "label": "keep",
+      "reason": "Package install — specific version info useful for future setup"
+    },
+    {
+      "id": 21,
+      "hook_event": "PostToolUse",
+      "raw_content": "TodoWrite: [{\"description\": \"Fix dedup threshold\", \"status\": \"pending\"}]",
+      "label": "keep",
+      "reason": "Task tracking — reveals that dedup threshold needs tuning"
+    },
+    {
+      "id": 22,
+      "hook_event": "PostToolUse",
+      "raw_content": "StrReplace: @ src/AgentMemory/appsettings.json: s/0.5/2.5/ -> 1 replacement",
+      "label": "keep",
+      "reason": "Specific file edit — shows a config value was changed, should be captured as a fact"
+    }
+  ]
+}

@@ -284,8 +284,10 @@ public class InMemoryMemoryRepository : IMemoryRepository
         string? category = null,
         CancellationToken ct = default)
     {
+        const double stubSimilarity = 1.0;
         var results = Memories.Values
-            .Where(m => category == null || m.Category == category)
+            .Where(m => (category == null || m.Category == category)
+                        && stubSimilarity >= minSimilarity)
             .Select(m => new MemorySearchResult(
                 m.Id,
                 m.Category,
@@ -294,7 +296,7 @@ public class InMemoryMemoryRepository : IMemoryRepository
                 m.CreatedAt,
                 m.LastSeenAt,
                 m.SeenCount,
-                1.0,  // Stub: always return max similarity for tests
+                stubSimilarity,
                 m.SourceExcerpt
             ))
             .Take(limit)
