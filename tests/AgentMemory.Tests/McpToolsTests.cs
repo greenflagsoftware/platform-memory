@@ -21,7 +21,7 @@ public class McpToolsTests
         // Arrange
         var expected = new List<MemorySearchResult>
         {
-            new(1, "decision", 4.0, "We decided to use pgvector.", DateTimeOffset.UtcNow, 0.91),
+            new(1, "decision", 4.0, "We decided to use pgvector.", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1, 0.91),
         };
 
         _retrievalMock

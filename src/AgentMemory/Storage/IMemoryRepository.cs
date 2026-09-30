@@ -2,7 +2,17 @@ namespace AgentMemory.Storage;
 
 public interface IMemoryRepository
 {
+    /// <summary>
+    /// Load a memory record by primary key.
+    /// </summary>
+    Task<MemoryRecord?> GetByIdAsync(long id, CancellationToken ct = default);
+
     Task AddMemoryAsync(MemoryRecord memory, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phase 3: Update an existing memory (e.g. bump last_seen_at, seen_count).
+    /// </summary>
+    Task UpdateMemoryAsync(MemoryRecord memory, CancellationToken ct = default);
 
     /// <summary>
     /// Search memories by cosine similarity to the given embedding vector.

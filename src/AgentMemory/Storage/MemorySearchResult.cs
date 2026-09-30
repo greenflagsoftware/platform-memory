@@ -9,5 +9,7 @@ public record MemorySearchResult(
     double Score,
     string Content,
     DateTimeOffset CreatedAt,
+    DateTimeOffset LastSeenAt,
+    int SeenCount,
     double Similarity
 );

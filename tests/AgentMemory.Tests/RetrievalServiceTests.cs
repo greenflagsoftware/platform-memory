@@ -31,8 +31,8 @@ public class RetrievalServiceTests
 
         var expected = new List<MemorySearchResult>
         {
-            new(1, "decision", 3.5, "Important decision", DateTimeOffset.UtcNow, 0.92),
-            new(2, "coding", 2.0, "Code pattern", DateTimeOffset.UtcNow, 0.85),
+            new(1, "decision", 3.5, "Important decision", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1, 0.92),
+            new(2, "coding", 2.0, "Code pattern", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1, 0.85),
         };
 
         _memoryRepoMock
@@ -119,7 +119,7 @@ public class RetrievalServiceTests
                 3, 0.8, "decision", It.IsAny<CancellationToken>()))
             .ReturnsAsync(new List<MemorySearchResult>
             {
-                new(1, "decision", 3.5, "Important decision", DateTimeOffset.UtcNow, 0.91)
+                new(1, "decision", 3.5, "Important decision", DateTimeOffset.UtcNow, DateTimeOffset.UtcNow, 1, 0.91)
             });
 
         // Act

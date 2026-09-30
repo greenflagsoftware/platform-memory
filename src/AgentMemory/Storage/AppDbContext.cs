@@ -84,6 +84,15 @@ public class AppDbContext : DbContext
                   .HasColumnName("created_at")
                   .HasDefaultValueSql("now()");
 
+            // Phase 3: dedup columns
+            entity.Property(e => e.LastSeenAt)
+                  .HasColumnName("last_seen_at")
+                  .HasDefaultValueSql("now()");
+
+            entity.Property(e => e.SeenCount)
+                  .HasColumnName("seen_count")
+                  .HasDefaultValue(1);
+
             entity.HasOne(e => e.Capture)
                   .WithMany()
                   .HasForeignKey(e => e.CaptureId)

@@ -24,7 +24,7 @@ public class CaptureProcessorTests
         var configBuilder = new ConfigurationBuilder()
             .AddInMemoryCollection(new Dictionary<string, string?>
             {
-                ["Memory:SaveThreshold"] = "0.5"
+                ["Memory:SaveThreshold"] = "2.5"
             })!;
         _config = configBuilder.Build();
 
@@ -181,10 +181,25 @@ public class InMemoryMemoryRepository : IMemoryRepository
     public Dictionary<long, MemoryRecord> Memories { get; } = new();
     private long _nextId = 1;
 
+    public Task<MemoryRecord?> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        Memories.TryGetValue(id, out var memory);
+        return Task.FromResult(memory);
+    }
+
     public Task AddMemoryAsync(MemoryRecord memory, CancellationToken ct = default)
     {
         memory.Id = _nextId++;
         Memories[memory.Id] = memory;
+        return Task.CompletedTask;
+    }
+
+    public Task UpdateMemoryAsync(MemoryRecord memory, CancellationToken ct = default)
+    {
+        if (Memories.ContainsKey(memory.Id))
+        {
+            Memories[memory.Id] = memory;
+        }
         return Task.CompletedTask;
     }
 
@@ -203,6 +218,8 @@ public class InMemoryMemoryRepository : IMemoryRepository
                 m.Score,
                 m.Content,
                 m.CreatedAt,
+                m.LastSeenAt,
+                m.SeenCount,
                 1.0  // Stub: always return max similarity for tests
             ))
             .Take(limit)

@@ -17,7 +17,6 @@ public static class AdminEndpoints
         {
             var query = db.Memories
                 .OrderByDescending(m => m.CreatedAt)
-                .Take(limit)
                 .AsQueryable();
 
             if (!string.IsNullOrWhiteSpace(category))
@@ -26,19 +25,98 @@ public static class AdminEndpoints
             }
 
             var memories = await query
+                .Take(limit)
                 .Select(m => new
                 {
                     m.Id,
                     m.Category,
                     m.Score,
                     m.Content,
-                    m.CreatedAt
+                    m.CreatedAt,
+                    m.LastSeenAt,
+                    m.SeenCount
                 })
                 .ToListAsync();
 
             return Results.Ok(memories);
         })
         .WithName("AdminListMemories");
+
+        // ── Phase 5a: DELETE /admin/memories/{id} ───────────────────
+        group.MapDelete("/memories/{id:long}", async (
+            long id,
+            AppDbContext db,
+            CancellationToken ct) =>
+        {
+            var memory = await db.Memories.FindAsync([id], ct);
+            if (memory == null)
+            {
+                return Results.NotFound(new { error = $"Memory {id} not found" });
+            }
+
+            db.Memories.Remove(memory);
+            await db.SaveChangesAsync(ct);
+
+            return Results.Ok(new
+            {
+                status = "deleted",
+                memory_id = id
+            });
+        })
+        .WithName("AdminDeleteMemory");
+
+        // ── Phase 5a: POST /admin/memories/prune ────────────────────
+        // Bulk-remove memories matching filters. Dry-run by default.
+        // Filters: category, max_score (inclusive), ids (comma-separated).
+        group.MapPost("/memories/prune", async (
+            PruneRequest request,
+            AppDbContext db,
+            CancellationToken ct) =>
+        {
+            var query = db.Memories.AsQueryable();
+
+            if (!string.IsNullOrWhiteSpace(request.Category))
+            {
+                query = query.Where(m => m.Category == request.Category);
+            }
+
+            if (request.MaxScore.HasValue)
+            {
+                query = query.Where(m => m.Score <= request.MaxScore.Value);
+            }
+
+            if (request.Ids is { Length: > 0 })
+            {
+                var ids = new HashSet<long>(request.Ids);
+                query = query.Where(m => ids.Contains(m.Id));
+            }
+
+            var matched = await query
+                .Select(m => new { m.Id, m.Category, m.Score, m.Content, m.CreatedAt })
+                .ToListAsync(ct);
+
+            var dryRun = request.DryRun ?? true;
+
+            if (!dryRun && matched.Count > 0)
+            {
+                // Remove all matched entities individually via EF Core
+                var memoryIds = matched.Select(m => m.Id).ToList();
+                var memoriesToDelete = await db.Memories
+                    .Where(m => memoryIds.Contains(m.Id))
+                    .ToListAsync(ct);
+                db.Memories.RemoveRange(memoriesToDelete);
+                await db.SaveChangesAsync(ct);
+            }
+
+            return Results.Ok(new
+            {
+                status = dryRun ? "dry_run" : "pruned",
+                dry_run = dryRun,
+                removed_count = matched.Count,
+                memories = matched
+            });
+        })
+        .WithName("AdminPruneMemories");
 
         // Re-runs classification + threshold + embedding for a capture that's already
         // stored. Useful after changing the classification model/prompt or the save
@@ -92,3 +170,11 @@ public static class AdminEndpoints
         .WithName("AdminApplyMigrations");
     }
 }
+
+// ── Phase 5a: Prune request type ─────────────────────────────────
+public record PruneRequest(
+    string? Category = null,
+    double? MaxScore = null,
+    long[]? Ids = null,
+    bool? DryRun = true
+);

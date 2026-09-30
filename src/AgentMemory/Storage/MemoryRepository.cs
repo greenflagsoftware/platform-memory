@@ -14,9 +14,30 @@ public class MemoryRepository : IMemoryRepository
         _db = db;
     }
 
+    /// <summary>
+    /// Load a memory record by primary key.
+    /// </summary>
+    public async Task<MemoryRecord?> GetByIdAsync(long id, CancellationToken ct = default)
+    {
+        return await _db.Memories.FindAsync([id], ct);
+    }
+
     public async Task AddMemoryAsync(MemoryRecord memory, CancellationToken ct = default)
     {
         _db.Memories.Add(memory);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Phase 3: Update an existing memory's metadata (last_seen_at, seen_count, score).
+    /// </summary>
+    public async Task UpdateMemoryAsync(MemoryRecord memory, CancellationToken ct = default)
+    {
+        // Mark only the properties that should be updated on dedup
+        _db.Memories.Attach(memory);
+        _db.Entry(memory).Property(m => m.LastSeenAt).IsModified = true;
+        _db.Entry(memory).Property(m => m.SeenCount).IsModified = true;
+        _db.Entry(memory).Property(m => m.Score).IsModified = true;
         await _db.SaveChangesAsync(ct);
     }
 
@@ -43,6 +64,8 @@ public class MemoryRepository : IMemoryRepository
                 score,
                 content,
                 created_at,
+                last_seen_at,
+                seen_count,
                 1.0 - (embedding <=> @embedding) AS similarity
             FROM memories
             WHERE 1.0 - (embedding <=> @embedding) >= @min_similarity
@@ -88,7 +111,9 @@ public class MemoryRepository : IMemoryRepository
                 Score: (double)reader.GetFloat(2),
                 Content: reader.GetString(3),
                 CreatedAt: reader.GetFieldValue<DateTimeOffset>(4),
-                Similarity: reader.GetDouble(5)
+                LastSeenAt: reader.GetFieldValue<DateTimeOffset>(5),
+                SeenCount: reader.GetInt32(6),
+                Similarity: reader.GetDouble(7)
             ));
         }
 

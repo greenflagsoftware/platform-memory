@@ -16,7 +16,7 @@ public class MemoryRecord
     /// <summary>Category label from classification, e.g. "question", "coding", "tool_call".</summary>
     public string Category { get; set; } = string.Empty;
 
-    /// <summary>Save-worthiness score from classification (0–1).</summary>
+    /// <summary>Save-worthiness score from classification (0–4 scale).</summary>
     public double Score { get; set; }
 
     /// <summary>Normalized content text that was embedded.</summary>
@@ -27,6 +27,17 @@ public class MemoryRecord
     public Vector Embedding { get; set; } = new Vector(new float[1536]);
 
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Phase 3: When this memory was last seen (via dedup). Initially set to CreatedAt.
+    /// </summary>
+    public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.UtcNow;
+
+    /// <summary>
+    /// Phase 3: How many duplicate captures have been consolidated into this memory.
+    /// Initially 1. Incremented on each dedup hit.
+    /// </summary>
+    public int SeenCount { get; set; } = 1;
 
     // Navigation property
     [ForeignKey(nameof(CaptureId))]
