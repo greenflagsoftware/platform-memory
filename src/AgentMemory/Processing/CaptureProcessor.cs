@@ -90,72 +90,19 @@ public class CaptureProcessor
                 return;
             }
 
-            // ── Phase 1d: Minimum-content gate (before LLM call) ──────
-            var skipReason = CheckGate(capture.RawContent);
-            if (skipReason != null)
-            {
-                _logger.LogInformation(
-                    "Capture {CaptureId} rejected by gate: {SkipReason}",
-                    captureId, skipReason);
+            var memory = await ProcessCaptureDryAsync(capture, ct);
+            if (memory == null)
                 return;
-            }
-
-            // Step 1: Classify
-            var classification = await _classification.ClassifyAsync(capture.RawContent, ct);
-            if (classification.Error != null)
-            {
-                // Phase 2d: Log the error and skip — no memory is stored.
-                _logger.LogWarning(
-                    "Classification returned error for capture {CaptureId}: {Error}; skipping",
-                    captureId, classification.Error);
-                return;
-            }
-
-            // Step 2: Threshold check
-            var threshold = _configuration.GetValue<double>(SaveThresholdConfigKey, DefaultSaveThreshold);
-            if (classification.SaveWorthiness < threshold)
-            {
-                _logger.LogInformation(
-                    "Capture {CaptureId} score {Score:F2} below threshold {Threshold:F2}; skipping memory",
-                    captureId, classification.SaveWorthiness, threshold);
-                return;
-            }
-
-            // ── Phase 4: Distill the capture into a standalone fact ──
-            // Extract optional context from capture metadata for the distillation call
-            var context = ExtractContext(capture.Metadata);
-            var distillation = await _distillation.DistillAsync(capture.RawContent, context, ct);
-
-            if (distillation.Error != null)
-            {
-                _logger.LogWarning(
-                    "Distillation returned error for capture {CaptureId}: {Error}; skipping memory",
-                    captureId, distillation.Error);
-                return;
-            }
-
-            // The content to store and embed is the distilled fact (or the raw content
-            // if distillation returned NONE — which shouldn't happen post-classification
-            // but handle gracefully)
-            var contentToStore = distillation.DistilledContent ?? capture.RawContent;
-            var sourceExcerpt = distillation.DistilledContent != null
-                ? capture.RawContent
-                : null;
-
-            // Step 3: Generate embedding from the distilled (or raw) content
-            var embedding = await _embedding.GenerateEmbeddingAsync(contentToStore, ct);
-            if (embedding == null)
-            {
-                _logger.LogWarning(
-                    "Embedding generation returned null for capture {CaptureId}; skipping memory",
-                    captureId);
-                return;
-            }
 
             // ── Phase 3: Deduplicate on write ───────────────────────
+            // (only applies to real persistence — dup check against existing store)
+            // For reprocess, we want a fresh memory, so skip dedup in the dry pipeline
+            // and handle it separately below.
+
+            // Check for duplicates against existing memories
             var dedupSimilarity = _configuration.GetValue<double>(DedupSimilarityConfigKey, DefaultDedupSimilarity);
             var existingResults = await _memoryRepo.SearchMemoriesAsync(
-                new Vector(embedding),
+                memory.Embedding,
                 limit: 1,
                 minSimilarity: dedupSimilarity,
                 ct: ct);
@@ -168,10 +115,9 @@ public class CaptureProcessor
                 {
                     existingMemory.LastSeenAt = DateTimeOffset.UtcNow;
                     existingMemory.SeenCount = existingMemory.SeenCount + 1;
-                    // Keep the higher score
-                    if (classification.SaveWorthiness > existingMemory.Score)
+                    if (memory.Score > existingMemory.Score)
                     {
-                        existingMemory.Score = classification.SaveWorthiness;
+                        existingMemory.Score = memory.Score;
                     }
                     await _memoryRepo.UpdateMemoryAsync(existingMemory, ct);
 
@@ -188,16 +134,6 @@ public class CaptureProcessor
             }
 
             // Step 4: Store memory via repository
-            var memory = new MemoryRecord
-            {
-                CaptureId = capture.Id,
-                Category = classification.Category,
-                Score = classification.SaveWorthiness,
-                Content = contentToStore,
-                SourceExcerpt = sourceExcerpt,
-                Embedding = new Vector(embedding),
-            };
-
             await _memoryRepo.AddMemoryAsync(memory, ct);
 
             _logger.LogInformation(
@@ -213,6 +149,84 @@ public class CaptureProcessor
         {
             _logger.LogError(ex, "Processing failed for capture {CaptureId}", captureId);
         }
+    }
+
+    /// <summary>
+    /// Run the full processing pipeline for a capture without persisting.
+    /// Returns a MemoryRecord ready for storage, or null if the capture was
+    /// skipped (gate/classify/distill/embedding failure).
+    /// Used by both ProcessCaptureAsync and the reprocess admin endpoint.
+    /// </summary>
+    public async Task<MemoryRecord?> ProcessCaptureDryAsync(
+        CaptureRecord capture,
+        CancellationToken ct = default)
+    {
+        // ── Phase 1d: Minimum-content gate (before LLM call) ──────
+        var skipReason = CheckGate(capture.RawContent);
+        if (skipReason != null)
+        {
+            _logger.LogInformation(
+                "Capture {CaptureId} rejected by gate: {SkipReason}",
+                capture.Id, skipReason);
+            return null;
+        }
+
+        // Step 1: Classify
+        var classification = await _classification.ClassifyAsync(capture.RawContent, ct);
+        if (classification.Error != null)
+        {
+            _logger.LogWarning(
+                "Classification returned error for capture {CaptureId}: {Error}; skipping",
+                capture.Id, classification.Error);
+            return null;
+        }
+
+        // Step 2: Threshold check
+        var threshold = _configuration.GetValue<double>(SaveThresholdConfigKey, DefaultSaveThreshold);
+        if (classification.SaveWorthiness < threshold)
+        {
+            _logger.LogInformation(
+                "Capture {CaptureId} score {Score:F2} below threshold {Threshold:F2}; skipping memory",
+                capture.Id, classification.SaveWorthiness, threshold);
+            return null;
+        }
+
+        // ── Phase 4: Distill the capture into a standalone fact ──
+        var context = ExtractContext(capture.Metadata);
+        var distillation = await _distillation.DistillAsync(capture.RawContent, context, ct);
+
+        if (distillation.Error != null)
+        {
+            _logger.LogWarning(
+                "Distillation returned error for capture {CaptureId}: {Error}; skipping memory",
+                capture.Id, distillation.Error);
+            return null;
+        }
+
+        var contentToStore = distillation.DistilledContent ?? capture.RawContent;
+        var sourceExcerpt = distillation.DistilledContent != null
+            ? capture.RawContent
+            : null;
+
+        // Step 3: Generate embedding from the distilled (or raw) content
+        var embedding = await _embedding.GenerateEmbeddingAsync(contentToStore, ct);
+        if (embedding == null)
+        {
+            _logger.LogWarning(
+                "Embedding generation returned null for capture {CaptureId}; skipping memory",
+                capture.Id);
+            return null;
+        }
+
+        return new MemoryRecord
+        {
+            CaptureId = capture.Id,
+            Category = classification.Category,
+            Score = classification.SaveWorthiness,
+            Content = contentToStore,
+            SourceExcerpt = sourceExcerpt,
+            Embedding = new Vector(embedding),
+        };
     }
 
     /// <summary>

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using AgentMemory.Processing;
 using AgentMemory.Storage;
 using Microsoft.EntityFrameworkCore;
@@ -118,6 +119,37 @@ public static class AdminEndpoints
         })
         .WithName("AdminPruneMemories");
 
+        // ── Phase 5b: POST /admin/memories/reprocess ────────────────
+        // Re-runs the full pipeline (gate → classify → distill → embed → dedup) for
+        // every capture (or a specific set). Deletes the existing memory for each
+        // capture and replaces it with the freshly processed result.
+        // Dry-run by default — reports what would change without making changes.
+        group.MapPost("/memories/reprocess", async (
+            ReprocessRequest request,
+            AppDbContext db,
+            CaptureProcessor processor,
+            CancellationToken ct) =>
+        {
+            // Step 1: Determine which captures to reprocess
+            if (request.CaptureIds is { Length: > 0 })
+            {
+                // Reprocess specific captures
+                var captureIds = new HashSet<long>(request.CaptureIds);
+                var captures = await db.Captures
+                    .Where(c => captureIds.Contains(c.Id))
+                    .OrderBy(c => c.Id)
+                    .ToListAsync(ct);
+                return await ReprocessHelper.RunReprocess(captures, request.DryRun ?? true, db, processor, ct);
+            }
+
+            // Reprocess ALL captures
+            var allCaptures = await db.Captures
+                .OrderBy(c => c.Id)
+                .ToListAsync(ct);
+            return await ReprocessHelper.RunReprocess(allCaptures, request.DryRun ?? true, db, processor, ct);
+        })
+        .WithName("AdminReprocessMemories");
+
         // Re-runs classification + threshold + embedding for a capture that's already
         // stored. Useful after changing the classification model/prompt or the save
         // threshold, or to retry a capture whose classification/embedding call failed.
@@ -178,3 +210,114 @@ public record PruneRequest(
     long[]? Ids = null,
     bool? DryRun = true
 );
+
+// ── Phase 5b: Reprocess request type ─────────────────────────────
+public record ReprocessRequest(
+    long[]? CaptureIds = null,
+    bool? DryRun = true
+);
+
+// ── Phase 5b: Reprocess logic ────────────────────────────────────
+/// <summary>
+/// Run the full processing pipeline for a batch of captures, replacing existing
+/// memories with freshly processed results. Dry-run by default.
+/// </summary>
+internal static class ReprocessHelper
+{
+    internal static async Task<IResult> RunReprocess(
+        List<CaptureRecord> captures,
+        bool dryRun,
+        AppDbContext db,
+        CaptureProcessor processor,
+        CancellationToken ct)
+    {
+        var results = new List<object>();
+        var totalChanges = 0;
+
+        foreach (var capture in captures)
+        {
+            // Get the current memory (if any) for this capture
+            var existingMemory = await db.Memories
+                .Where(m => m.CaptureId == capture.Id)
+                .OrderByDescending(m => m.CreatedAt)
+                .FirstOrDefaultAsync(ct);
+
+            // Store the old state for dry-run comparison
+            var oldContent = existingMemory?.Content;
+            var oldCategory = existingMemory?.Category;
+            var oldScore = existingMemory?.Score;
+
+            // Process the capture through the full pipeline (in-memory, not persisted yet)
+            var newMemory = await processor.ProcessCaptureDryAsync(capture, ct);
+
+            if (newMemory == null)
+            {
+                // Capture didn't pass the pipeline — track whether we'd delete the old memory
+                if (existingMemory != null)
+                {
+                    results.Add(new
+                    {
+                        capture_id = capture.Id,
+                        action = "delete_old_memory",
+                        reason = "no longer passes pipeline (gate/classify/distill)",
+                        old = new { content = oldContent, category = oldCategory, score = oldScore },
+                        _new = (object?)null
+                    });
+                    totalChanges++;
+                }
+                // else: wasn't stored before and still isn't — no change
+                continue;
+            }
+
+            // Compare with existing
+            var changed = existingMemory == null
+                || newMemory.Category != oldCategory
+                || Math.Abs(newMemory.Score - (oldScore ?? 0)) > 0.01
+                || newMemory.Content != oldContent;
+
+            if (changed)
+            {
+                results.Add(new
+                {
+                    capture_id = capture.Id,
+                    action = existingMemory == null ? "create" : "update",
+                    old = existingMemory == null
+                        ? null
+                        : (object)new { content = oldContent, category = oldCategory, score = oldScore },
+                    _new = new
+                    {
+                        content = newMemory.Content,
+                        category = newMemory.Category,
+                        score = newMemory.Score,
+                        source_excerpt = newMemory.SourceExcerpt
+                    }
+                });
+                totalChanges++;
+            }
+
+            if (!dryRun && changed)
+            {
+                // Apply changes: delete old memory, keep captures_old content
+                if (existingMemory != null)
+                {
+                    db.Memories.Remove(existingMemory);
+                }
+
+                // Insert the new memory
+                db.Memories.Add(newMemory);
+                await db.SaveChangesAsync(ct);
+            }
+        }
+
+        var status = dryRun ? "dry_run" : "reprocessed";
+
+        return Results.Ok(new
+        {
+            status,
+            dry_run = dryRun,
+            total_captures = captures.Count,
+            total_changes = totalChanges,
+            results
+        });
+    }
+}
