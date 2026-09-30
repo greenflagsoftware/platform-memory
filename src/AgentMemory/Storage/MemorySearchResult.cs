@@ -11,5 +11,6 @@ public record MemorySearchResult(
     DateTimeOffset CreatedAt,
     DateTimeOffset LastSeenAt,
     int SeenCount,
-    double Similarity
+    double Similarity,
+    string? SourceExcerpt = null
 );

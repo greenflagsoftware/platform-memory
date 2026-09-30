@@ -66,6 +66,7 @@ public class MemoryRepository : IMemoryRepository
                 created_at,
                 last_seen_at,
                 seen_count,
+                source_excerpt,
                 1.0 - (embedding <=> @embedding) AS similarity
             FROM memories
             WHERE 1.0 - (embedding <=> @embedding) >= @min_similarity
@@ -113,7 +114,8 @@ public class MemoryRepository : IMemoryRepository
                 CreatedAt: reader.GetFieldValue<DateTimeOffset>(4),
                 LastSeenAt: reader.GetFieldValue<DateTimeOffset>(5),
                 SeenCount: reader.GetInt32(6),
-                Similarity: reader.GetDouble(7)
+                SourceExcerpt: reader.IsDBNull(7) ? null : reader.GetString(7),
+                Similarity: reader.GetDouble(8)
             ));
         }
 

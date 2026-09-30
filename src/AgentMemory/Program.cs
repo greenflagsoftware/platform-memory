@@ -1,5 +1,6 @@
 using AgentMemory.Capture;
 using AgentMemory.Classification;
+using AgentMemory.Distillation;
 using AgentMemory.Embedding;
 using AgentMemory.Processing;
 using AgentMemory.Retrieval;
@@ -46,10 +47,24 @@ builder.Services.AddHttpClient<IEmbeddingService, EmbeddingService>(client => { 
         options.Retry.ShouldRetryAfterHeader = true;
     });
 
+// ── Phase 4: Distillation service ─────────────────────────────────
+builder.Services.AddHttpClient<IDistillationService, DistillationService>(client => { })
+    .AddStandardResilienceHandler(options =>
+    {
+        options.Retry.MaxRetryAttempts = 2;
+        options.Retry.DelayGenerator = static args =>
+        {
+            var delay = TimeSpan.FromMilliseconds(200 * Math.Pow(2, args.AttemptNumber));
+            return ValueTask.FromResult<TimeSpan?>(TimeSpan.FromSeconds(Math.Min(delay.TotalSeconds, 10)));
+        };
+        options.Retry.ShouldRetryAfterHeader = true;
+    });
+
 builder.Services.AddScoped<CaptureProcessor>();
 builder.Services.AddScoped<ICaptureRepository, CaptureRepository>();
 builder.Services.AddScoped<IMemoryRepository, MemoryRepository>();
 builder.Services.AddScoped<IRetrievalService, RetrievalService>();
+builder.Services.AddScoped<IDistillationService, DistillationService>();
 
 // ── MCP server (real JSON-RPC/SSE transport) ────────────────────
 // Registered alongside the existing plain HTTP endpoints. The /capture, /admin/*,

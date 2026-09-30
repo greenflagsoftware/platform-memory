@@ -1,4 +1,6 @@
+using System.Text.Json;
 using AgentMemory.Classification;
+using AgentMemory.Distillation;
 using AgentMemory.Embedding;
 using AgentMemory.Storage;
 using Pgvector;
@@ -6,13 +8,15 @@ using Pgvector;
 namespace AgentMemory.Processing;
 
 /// <summary>
-/// Background pipeline for a single capture: classify → threshold → embed → store.
+/// Background pipeline for a single capture: classify → threshold → distill → embed → dedup → store.
 /// Runs as an in-process fire-and-forget Task per capture.
 ///
 /// Quality plan phases implemented here:
 /// - Phase 1d: Minimum-content gate (server-side, before the LLM call)
 /// - Phase 2a: Corrected threshold scale (default 2.5 on 0-4 scale)
 /// - Phase 2d: Fixed error path (classification error no longer pretends to store)
+/// - Phase 3: Deduplicate on write (search before insert, merge on hit)
+/// - Phase 4: Distill captures into standalone facts via OpenRouter, embed the distilled content
 /// </summary>
 public class CaptureProcessor
 {
@@ -47,6 +51,7 @@ public class CaptureProcessor
 
     private readonly ICaptureRepository _captureRepo;
     private readonly IClassificationService _classification;
+    private readonly IDistillationService _distillation;
     private readonly IEmbeddingService _embedding;
     private readonly IMemoryRepository _memoryRepo;
     private readonly IConfiguration _configuration;
@@ -55,12 +60,14 @@ public class CaptureProcessor
     public CaptureProcessor(
         ICaptureRepository captureRepo,
         IClassificationService classification,
+        IDistillationService distillation,
         IEmbeddingService embedding,
         IMemoryRepository memoryRepo,
         IConfiguration configuration,
         ILogger<CaptureProcessor> logger)
     {
         _classification = classification;
+        _distillation = distillation;
         _embedding = embedding;
         _memoryRepo = memoryRepo;
         _captureRepo = captureRepo;
@@ -98,8 +105,6 @@ public class CaptureProcessor
             if (classification.Error != null)
             {
                 // Phase 2d: Log the error and skip — no memory is stored.
-                // The old code commented "still record a low-score memory" but
-                // returned at the threshold check, making the comment misleading.
                 _logger.LogWarning(
                     "Classification returned error for capture {CaptureId}: {Error}; skipping",
                     captureId, classification.Error);
@@ -116,8 +121,29 @@ public class CaptureProcessor
                 return;
             }
 
-            // Step 3: Generate embedding
-            var embedding = await _embedding.GenerateEmbeddingAsync(capture.RawContent, ct);
+            // ── Phase 4: Distill the capture into a standalone fact ──
+            // Extract optional context from capture metadata for the distillation call
+            var context = ExtractContext(capture.Metadata);
+            var distillation = await _distillation.DistillAsync(capture.RawContent, context, ct);
+
+            if (distillation.Error != null)
+            {
+                _logger.LogWarning(
+                    "Distillation returned error for capture {CaptureId}: {Error}; skipping memory",
+                    captureId, distillation.Error);
+                return;
+            }
+
+            // The content to store and embed is the distilled fact (or the raw content
+            // if distillation returned NONE — which shouldn't happen post-classification
+            // but handle gracefully)
+            var contentToStore = distillation.DistilledContent ?? capture.RawContent;
+            var sourceExcerpt = distillation.DistilledContent != null
+                ? capture.RawContent
+                : null;
+
+            // Step 3: Generate embedding from the distilled (or raw) content
+            var embedding = await _embedding.GenerateEmbeddingAsync(contentToStore, ct);
             if (embedding == null)
             {
                 _logger.LogWarning(
@@ -137,8 +163,6 @@ public class CaptureProcessor
             if (existingResults.Count > 0)
             {
                 var existing = existingResults[0];
-                // Found a near-duplicate — update the existing memory instead of inserting.
-                // But we still need a MemoryRecord instance to update. Load it from DB.
                 var existingMemory = await _memoryRepo.GetByIdAsync(existing.Id, ct);
                 if (existingMemory != null)
                 {
@@ -157,7 +181,6 @@ public class CaptureProcessor
                         captureId, existingMemory.Id, existingMemory.SeenCount, existingMemory.Score);
                     return;
                 }
-                // Fall-through if we couldn't load the existing memory for some reason
                 _logger.LogWarning(
                     "Dedup hit for capture {CaptureId}: found memory id={ExistingId} but could not load it; " +
                     "inserting new memory",
@@ -170,15 +193,17 @@ public class CaptureProcessor
                 CaptureId = capture.Id,
                 Category = classification.Category,
                 Score = classification.SaveWorthiness,
-                Content = capture.RawContent,
+                Content = contentToStore,
+                SourceExcerpt = sourceExcerpt,
                 Embedding = new Vector(embedding),
             };
 
             await _memoryRepo.AddMemoryAsync(memory, ct);
 
             _logger.LogInformation(
-                "Stored memory id={MemoryId} for capture {CaptureId}: category={Category}, score={Score:F2}",
-                memory.Id, captureId, memory.Category, memory.Score);
+                "Stored memory id={MemoryId} for capture {CaptureId}: category={Category}, " +
+                "score={Score:F2}, content_len={ContentLen}",
+                memory.Id, captureId, memory.Category, memory.Score, memory.Content.Length);
         }
         catch (OperationCanceledException)
         {
@@ -217,16 +242,13 @@ public class CaptureProcessor
 
         // Minimum word count
         var minWords = _configuration.GetValue<int>(MinWordsConfigKey, DefaultMinWords);
-        // Tokenize by whitespace and punctuation boundaries
         var words = rawContent
             .Split(new[] { ' ', '\t', '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries)
             .Where(w => w.Length > 0)
             .ToList();
 
-        // A quick heuristic: if it's very short and has no code-like tokens (identifiers, paths, etc.)
         if (words.Count < minWords)
         {
-            // Check for code tokens: things containing underscores, dots, slashes, brackets, etc.
             var hasCodeToken = words.Any(w =>
                 w.Contains('_') || w.Contains('.') || w.Contains('/') ||
                 w.Contains('\\') || w.Contains('(') || w.Contains(')') ||
@@ -242,5 +264,40 @@ public class CaptureProcessor
         }
 
         return null; // accepted
+    }
+
+    /// <summary>
+    /// Extract a bounded context string from the capture's JSON metadata.
+    /// Looks for a "context" or "previous_turns" field; limits to ~2000 chars.
+    /// </summary>
+    private static string? ExtractContext(string metadata)
+    {
+        if (string.IsNullOrWhiteSpace(metadata) || metadata == "{}")
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(metadata);
+            var root = doc.RootElement;
+
+            // Try "context" first, then "previous_turns"
+            if (root.TryGetProperty("context", out var ctx) && ctx.ValueKind == JsonValueKind.String)
+            {
+                var text = ctx.GetString() ?? "";
+                return text.Length > 2000 ? text[..2000] : text;
+            }
+
+            if (root.TryGetProperty("previous_turns", out var turns) && turns.ValueKind == JsonValueKind.String)
+            {
+                var text = turns.GetString() ?? "";
+                return text.Length > 2000 ? text[..2000] : text;
+            }
+        }
+        catch
+        {
+            // Best-effort parse
+        }
+
+        return null;
     }
 }

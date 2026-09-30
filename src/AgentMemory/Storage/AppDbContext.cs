@@ -80,6 +80,12 @@ public class AppDbContext : DbContext
                   .HasColumnType("vector(1536)")
                   .IsRequired();
 
+            // Phase 4: optional source excerpt
+            entity.Property(e => e.SourceExcerpt)
+                  .HasColumnName("source_excerpt")
+                  .HasColumnType("text")
+                  .IsRequired(false);
+
             entity.Property(e => e.CreatedAt)
                   .HasColumnName("created_at")
                   .HasDefaultValueSql("now()");

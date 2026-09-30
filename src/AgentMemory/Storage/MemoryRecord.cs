@@ -29,6 +29,12 @@ public class MemoryRecord
     public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.UtcNow;
 
     /// <summary>
+    /// Phase 4: The raw capture text from which this distilled memory was derived.
+    /// Null when the memory stores the raw content directly (no distillation).
+    /// </summary>
+    public string? SourceExcerpt { get; set; }
+
+    /// <summary>
     /// Phase 3: When this memory was last seen (via dedup). Initially set to CreatedAt.
     /// </summary>
     public DateTimeOffset LastSeenAt { get; set; } = DateTimeOffset.UtcNow;
